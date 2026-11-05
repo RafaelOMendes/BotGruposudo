@@ -7,7 +7,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import http from 'node:http';
 import qrcode from 'qrcode-terminal';
+import QRCode from 'qrcode';
 import pino from 'pino';
 import NodeCache from '@cacheable/node-cache';
 import makeWASocket, {
@@ -85,7 +87,36 @@ function guardarEnviada(msg) {
   if (enviadas.size > 200) enviadas.delete(enviadas.keys().next().value);
 }
 
-const groupCache = new NodeCache({ stdTTL: 5 * 60, useClones: false });
+// ---------- página local com o QR (o terminal às vezes é estreito demais) ----------
+const PORTA_QR = Number(process.env.BOT_QR_PORT || 3999);
+let qrAtual = null;
+let servidorQr = null;
+function paginaQr() {
+  const corpo = qrAtual
+    ? `<img src="${qrAtual}" alt="QR code"><p>WhatsApp → Aparelhos conectados → Conectar aparelho</p>`
+    : '<p>✅ Conectado! Pode fechar esta página.</p>';
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="3"><title>QR do Bot do Gabreu</title>
+<style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#f4f4f5;color:#18181b;text-align:center}
+img{width:min(80vmin,420px);background:#fff;padding:16px;border-radius:12px}</style></head>
+<body><main><h1>🎙️ Bot do Gabreu</h1>${corpo}</main></body></html>`;
+}
+async function mostrarQr(qr) {
+  qrAtual = await QRCode.toDataURL(qr, { margin: 1, width: 420 });
+  if (!servidorQr) {
+    servidorQr = http
+      .createServer((_, res) => res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(paginaQr()))
+      .listen(PORTA_QR, '127.0.0.1', () => log(`QR também disponível em http://localhost:${PORTA_QR}`))
+      .on('error', (e) => log('Não deu para abrir a página do QR:', e.message));
+  }
+}
+function fecharQr() {
+  if (!servidorQr) return;
+  qrAtual = null;
+  setTimeout(() => { servidorQr?.close(); servidorQr = null; }, 10_000); // dá tempo da página mostrar "Conectado"
+}
+
+const groupCache =new NodeCache({ stdTTL: 5 * 60, useClones: false });
 const msgRetryCounterCache = new NodeCache();
 const jaRespondidas = new Set();
 
@@ -123,8 +154,10 @@ async function iniciar() {
     if (qr) {
       log('Escaneie o QR code abaixo no WhatsApp (Aparelhos conectados > Conectar aparelho):');
       qrcode.generate(qr, { small: true });
+      mostrarQr(qr).catch((e) => log('Erro ao gerar imagem do QR:', e.message));
     }
     if (connection === 'open') {
+      fecharQr();
       log(`Bot pronto. Ouvindo "?" de ${CONFIG.remetente} em ${CONFIG.grupo}.`);
     }
     if (connection === 'close') {
