@@ -4,5 +4,14 @@
   "ids": [
     "123456789012345@lid",
     "5511999999999@s.whatsapp.net"
-  ]
+  ],
+  "figurinha": {
+    "remetente": "Nome de perfil da pessoa",
+    "ids": [
+      "123456789012345@lid"
+    ],
+    "arquivo": "figurinhas/manda-figurinha.webp",
+    "intervaloSeg": 60,
+    "chanceSemIA": 1
+  }
 }

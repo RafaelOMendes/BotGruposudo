@@ -1,5 +1,8 @@
-// Bot do Gabreu: quando o Gabriel manda uma mensagem só de interrogações ("?", "??", "????"...)
-// no grupo configurado, responde citando a mensagem com o áudio em audio/gabreu.ogg (mensagem de voz).
+// Bot do Gabreu, no grupo configurado:
+//  1. Gabriel manda uma mensagem só de interrogações ("?", "??", "????"...) → responde com o
+//     áudio em audio/gabreu.ogg (mensagem de voz).
+//  2. Nicolas manda figurinha ou imagem → o Claude (via `claude -p`, sem chave de API) decide se é non-sense; se for, responde
+//     com a figurinha em figurinhas/manda-figurinha.webp.
 //
 // Usa Baileys (protocolo do WhatsApp direto, sem navegador). Os pedidos de reenvio que o
 // iPhone faz quando não consegue descriptografar ("Aguardando mensagem") são atendidos via getMessage.
@@ -15,11 +18,13 @@ import NodeCache from '@cacheable/node-cache';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   isJidGroup,
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
+import { ehNonsense, iniciarIA } from './ia.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +41,17 @@ const CONFIG = {
   audio: path.join(DIR, 'audio', 'gabreu.ogg'),
   // Mensagens mais velhas que isso (ex: entregues ao reconectar) são ignoradas.
   idadeMaxSeg: 10 * 60,
+  figurinha: {
+    remetente: local.figurinha?.remetente || 'Nicolas Bresolin',
+    ids: (local.figurinha?.ids || []).map((s) => s.trim()),
+    arquivo: path.join(DIR, local.figurinha?.arquivo || 'figurinhas/manda-figurinha.webp'),
+    // Intervalo mínimo entre respostas (evita spam e gasto com a IA).
+    intervaloSeg: local.figurinha?.intervaloSeg ?? 60,
+    // Se o `claude` não estiver disponível: chance de responder mesmo assim (1 = sempre, 0 = nunca).
+    chanceSemIA: local.figurinha?.chanceSemIA ?? 1,
+  },
+  // Caminho do Claude Code CLI (já logado). Padrão: `claude` no PATH.
+  claude: process.env.CLAUDE_CLI_PATH || local.claude || 'claude',
 };
 
 // ---------- log ----------
@@ -78,6 +94,30 @@ const textoDa = (m) =>
   '';
 
 const audio = fs.readFileSync(CONFIG.audio);
+const figurinha = fs.existsSync(CONFIG.figurinha.arquivo) ? fs.readFileSync(CONFIG.figurinha.arquivo) : null;
+const ia = await iniciarIA(CONFIG.claude);
+
+// Desembrulha mensagens temporárias / de visualização única.
+function conteudo(m) {
+  let c = m.message;
+  for (let i = 0; i < 3 && c; i++) {
+    const dentro = c.ephemeralMessage?.message || c.viewOnceMessage?.message || c.viewOnceMessageV2?.message;
+    if (!dentro) break;
+    c = dentro;
+  }
+  return c || {};
+}
+
+// Um ID bate com a lista configurada, ou (sem lista) o nome de perfil contém parte do nome.
+function ehDe(m, { ids, remetente }) {
+  const meus = [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
+  if (ids.length) return meus.some((id) => ids.map(jidNormalizedUser).includes(id));
+  const nome = normalizar(m.pushName);
+  if (!nome) return false;
+  const alvo = normalizar(remetente);
+  if (nome === alvo || alvo.startsWith(nome) || nome.startsWith(alvo)) return true;
+  return alvo.split(/\s+/).some((parte) => parte.length >= 4 && nome.includes(parte));
+}
 
 // Mensagens que o bot enviou, para reenviar quando algum aparelho (ex: iPhone) pedir retry.
 const enviadas = new Map();
@@ -159,6 +199,8 @@ async function iniciar() {
     if (connection === 'open') {
       fecharQr();
       log(`Bot pronto. Ouvindo "?" de ${CONFIG.remetente} em ${CONFIG.grupo}.`);
+      if (!figurinha) log(`Figurinha não encontrada em ${CONFIG.figurinha.arquivo}; resposta a figurinhas desligada.`);
+      else log(`Figurinhas de ${CONFIG.figurinha.remetente}: ${ia ? 'IA decide se é non-sense' : `claude CLI não encontrado, responde com chance ${CONFIG.figurinha.chanceSemIA}`}.`);
     }
     if (connection === 'close') {
       const codigo = lastDisconnect?.error?.output?.statusCode;
@@ -171,12 +213,50 @@ async function iniciar() {
     }
   });
 
-  function ehDoGabriel(m) {
-    const ids = [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
-    if (CONFIG.ids.length) return ids.some((id) => CONFIG.ids.map(jidNormalizedUser).includes(id));
-    const alvo = normalizar(CONFIG.remetente);
-    const nome = normalizar(m.pushName);
-    return !!nome && (nome === alvo || alvo.startsWith(nome) || nome.startsWith(alvo));
+  async function responderInterrogacao(m, jid) {
+    if (!CONFIG.gatilho.test(textoDa(m).trim())) return;
+    if (!ehDe(m, { ids: CONFIG.ids, remetente: CONFIG.remetente })) {
+      log(`"?" no grupo, mas de outra pessoa (${m.pushName || '?'} / ${m.key.participant}); ignorado.`);
+      return;
+    }
+    jaRespondidas.add(m.key.id);
+    const enviada = await sock.sendMessage(
+      jid,
+      { audio, mimetype: 'audio/ogg; codecs=opus', ptt: true },
+      { quoted: m }
+    );
+    guardarEnviada(enviada);
+    log(`Áudio enviado em resposta a "${textoDa(m).trim()}" de ${m.pushName || CONFIG.remetente}.`);
+  }
+
+  let ultimaFigurinha = 0;
+  async function responderFigurinha(m, jid) {
+    const c = conteudo(m);
+    const tipo = c.stickerMessage ? 'figurinha' : c.imageMessage ? 'imagem' : null;
+    if (!tipo || !figurinha) return;
+    if (!ehDe(m, CONFIG.figurinha)) return;
+
+    const quem = `${m.pushName || CONFIG.figurinha.remetente} (${m.key.participant})`;
+    if (Date.now() - ultimaFigurinha < CONFIG.figurinha.intervaloSeg * 1000) {
+      log(`${tipo} de ${quem}, mas ainda no intervalo mínimo; ignorada.`);
+      return;
+    }
+
+    let veredito;
+    if (ia) {
+      const buffer = await downloadMediaMessage(m, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+      veredito = await ehNonsense(buffer);
+    } else {
+      veredito = { nonsense: Math.random() < CONFIG.figurinha.chanceSemIA, motivo: 'sem claude CLI' };
+    }
+    log(`${tipo} de ${quem}: ${veredito.nonsense ? 'NON-SENSE' : 'normal'} — ${veredito.motivo}`);
+    if (!veredito.nonsense) return;
+
+    ultimaFigurinha = Date.now();
+    jaRespondidas.add(m.key.id);
+    const enviada = await sock.sendMessage(jid, { sticker: figurinha }, { quoted: m });
+    guardarEnviada(enviada);
+    log(`Figurinha "manda figurinha" enviada em resposta a ${quem}.`);
   }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -184,28 +264,16 @@ async function iniciar() {
     for (const m of messages) {
       try {
         const jid = m.key.remoteJid;
-        if (m.key.fromMe || !isJidGroup(jid)) continue;
-        if (!CONFIG.gatilho.test(textoDa(m).trim())) continue;
-        if (jaRespondidas.has(m.key.id)) continue;
+        if (m.key.fromMe || !isJidGroup(jid) || jaRespondidas.has(m.key.id)) continue;
 
         const idade = Date.now() / 1000 - Number(m.messageTimestamp || 0);
         if (idade > CONFIG.idadeMaxSeg) continue;
 
         const meta = await metadadosGrupo(jid);
         if (normalizar(meta.subject) !== normalizar(CONFIG.grupo)) continue;
-        if (!ehDoGabriel(m)) {
-          log(`"?" no grupo, mas de outra pessoa (${m.pushName || '?'} / ${m.key.participant}); ignorado.`);
-          continue;
-        }
 
-        jaRespondidas.add(m.key.id);
-        const enviada = await sock.sendMessage(
-          jid,
-          { audio, mimetype: 'audio/ogg; codecs=opus', ptt: true },
-          { quoted: m }
-        );
-        guardarEnviada(enviada);
-        log(`Áudio enviado em resposta a "${textoDa(m).trim()}" de ${m.pushName || CONFIG.remetente}.`);
+        await responderInterrogacao(m, jid);
+        await responderFigurinha(m, jid);
       } catch (err) {
         log('Erro ao processar mensagem:', err.stack || err);
       }
