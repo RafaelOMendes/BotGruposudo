@@ -4,7 +4,8 @@
   "description": "Responde o \"?\" do Gabriel Lassen no Gruposudo com um áudio",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "node scripts/patch-wwebjs.js"
   },
   "author": "",
   "license": "ISC",

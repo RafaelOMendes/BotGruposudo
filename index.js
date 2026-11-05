@@ -50,29 +50,110 @@ client.on('disconnected', (motivo) => {
   setTimeout(() => process.exit(1), 10_000); // o start.cmd reinicia
 });
 
-async function ehDoGabriel(msg) {
-  const contato = await msg.getContact();
-  if (CONFIG.numero) return contato.number === CONFIG.numero;
+// msg.getChat()/getContact() da whatsapp-web.js quebraram com o WhatsApp Web atual
+// ("r: r" em getChatModel). Então lemos os dados direto das coleções da página.
+async function infoDaPagina(chatId, autorId) {
+  return client.pupPage.evaluate((chatId, autorId) => {
+    const { Chat, Contact } = window.require('WAWebCollections');
+    const chat = Chat.get(chatId);
+    const contato = autorId ? Contact.get(autorId) : null;
+    return {
+      grupo: chat?.formattedTitle || chat?.name || chat?.groupMetadata?.subject || '',
+      nomes: contato ? [contato.name, contato.pushname, contato.verifiedName, contato.shortName] : [],
+      numero: contato?.phoneNumber?.user || contato?.id?.user || '',
+    };
+  }, chatId, autorId);
+}
+
+function bateNome(nomes) {
   const alvo = normalizar(CONFIG.remetente);
-  return [contato.name, contato.pushname, contato.shortName]
-    .some((n) => normalizar(n) === alvo || normalizar(n).startsWith(alvo));
+  return nomes.some((n) => n && (normalizar(n) === alvo || normalizar(n).startsWith(alvo)));
+}
+
+async function ehGatilho(msg) {
+  if ((msg.body || '').trim() !== CONFIG.gatilho) return false;
+  if (!msg.from.endsWith('@g.us') || msg.fromMe) return false;
+
+  const info = await infoDaPagina(msg.from, msg.author);
+  if (normalizar(info.grupo) !== normalizar(CONFIG.grupo)) return false;
+
+  const nomes = [...info.nomes, msg._data?.notifyName];
+  if (CONFIG.numero) return info.numero === CONFIG.numero || (msg.author || '').startsWith(CONFIG.numero);
+  return bateNome(nomes);
+}
+
+// sendSeen da whatsapp-web.js quebra no WhatsApp Web atual ("must include an id property"),
+// então fica desligado. Se mesmo assim falhar, tenta variações mais simples.
+async function responder(chatId, msgId) {
+  const tentativas = [
+    { nome: 'voz citando', opts: { sendAudioAsVoice: true, quotedMessageId: msgId, ignoreQuoteErrors: true } },
+    { nome: 'voz', opts: { sendAudioAsVoice: true } },
+    { nome: 'áudio', opts: {} },
+  ];
+  for (const t of tentativas) {
+    try {
+      await client.sendMessage(chatId, audio, { sendSeen: false, ...t.opts });
+      log(`Áudio enviado em resposta ao "?" do Gabriel (${t.nome}).`);
+      return;
+    } catch (err) {
+      log(`Falhou enviando (${t.nome}):`, err.message);
+    }
+  }
+  throw new Error('Nenhuma forma de envio funcionou.');
 }
 
 client.on('message', async (msg) => {
   try {
-    if (msg.body.trim() !== CONFIG.gatilho) return;
-
-    const chat = await msg.getChat();
-    if (!chat.isGroup || normalizar(chat.name) !== normalizar(CONFIG.grupo)) return;
-    if (!(await ehDoGabriel(msg))) return;
-
-    await chat.sendMessage(audio, { sendAudioAsVoice: true, quotedMessageId: msg.id._serialized });
-    log('Áudio enviado em resposta ao "?" do Gabriel.');
+    if (await ehGatilho(msg)) await responder(msg.from, msg.id._serialized);
   } catch (err) {
     log('Erro ao processar mensagem:', err.stack || err);
   }
 });
 
+// Ao ligar: se o último "?" do Gabriel no grupo ainda não teve resposta minha, responde.
+async function responderPendente() {
+  const pendente = await client.pupPage.evaluate((grupo, gatilho) => {
+    const norm = (s) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+    const { Chat } = window.require('WAWebCollections');
+    const chat = Chat.getModelsArray().find(
+      (c) => c.id?.server === 'g.us' && norm(c.formattedTitle || c.name) === norm(grupo)
+    );
+    if (!chat) return null;
+    const msgs = chat.msgs.getModelsArray().slice(-30);
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.id.fromMe) return null; // já falei depois
+      if ((m.body || '').trim() === gatilho) {
+        const autor = m.author?._serialized || m.id.participant?._serialized;
+        return { chatId: chat.id._serialized, msgId: m.id._serialized, autor, notifyName: m.notifyName, t: m.t };
+      }
+    }
+    return null;
+  }, CONFIG.grupo, CONFIG.gatilho);
+
+  if (!pendente) return;
+  if (Date.now() / 1000 - pendente.t > 6 * 3600) return; // ignora "?" com mais de 6h
+  const info = await infoDaPagina(pendente.chatId, pendente.autor);
+  const ok = CONFIG.numero
+    ? info.numero === CONFIG.numero
+    : bateNome([...info.nomes, pendente.notifyName]);
+  if (ok) {
+    log('Encontrei um "?" pendente do Gabriel, respondendo...');
+    await responder(pendente.chatId, pendente.msgId);
+  }
+}
+
+client.on('ready', () => {
+  setTimeout(() => responderPendente().catch((e) => log('Erro no pendente:', e.stack || e)), 5000);
+});
+
 process.on('unhandledRejection', (err) => log('unhandledRejection:', err?.stack || err));
 
-client.initialize();
+client.initialize().catch((err) => {
+  if (/already running/i.test(err.message)) {
+    log('Já existe outra instância do bot rodando; saindo.');
+    process.exit(2); // start.cmd não reinicia com código 2
+  }
+  log('Falha ao iniciar:', err.stack || err);
+  process.exit(1);
+});
