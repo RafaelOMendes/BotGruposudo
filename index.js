@@ -1,4 +1,4 @@
-// Bot do Gabreu: quando o Gabriel Lassen manda "?" no grupo Gruposudo,
+// Bot do Gabreu: quando o Gabriel Lassen manda "?" (ou "??", "????"...) no grupo Gruposudo,
 // responde com o áudio em audio/gabreu.ogg (como mensagem de voz).
 
 const path = require('path');
@@ -11,7 +11,8 @@ const CONFIG = {
   remetente: process.env.BOT_REMETENTE || 'Gabriel Lassen',
   // Opcional: número do Gabriel (só dígitos, ex: 5511999999999) — mais confiável que o nome.
   numero: process.env.BOT_NUMERO || '',
-  gatilho: '?',
+  // Mensagem feita só de pontos de interrogação: "?", "??", "????"...
+  gatilho: '^[?？]+$',
   audio: path.join(__dirname, 'audio', 'gabreu.ogg'),
   chrome: process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
 };
@@ -44,7 +45,7 @@ client.on('qr', (qr) => {
 
 client.on('authenticated', () => log('Autenticado.'));
 client.on('auth_failure', (m) => log('Falha na autenticação:', m));
-client.on('ready', () => log(`Bot pronto. Ouvindo "${CONFIG.gatilho}" de ${CONFIG.remetente} em ${CONFIG.grupo}.`));
+client.on('ready', () => log(`Bot pronto. Ouvindo "?" de ${CONFIG.remetente} em ${CONFIG.grupo}.`));
 client.on('disconnected', (motivo) => {
   log('Desconectado:', motivo, '— reiniciando em 10s.');
   setTimeout(() => process.exit(1), 10_000); // o start.cmd reinicia
@@ -71,7 +72,7 @@ function bateNome(nomes) {
 }
 
 async function ehGatilho(msg) {
-  if ((msg.body || '').trim() !== CONFIG.gatilho) return false;
+  if (!new RegExp(CONFIG.gatilho).test((msg.body || '').trim())) return false;
   if (!msg.from.endsWith('@g.us') || msg.fromMe) return false;
 
   const info = await infoDaPagina(msg.from, msg.author);
@@ -123,7 +124,7 @@ async function responderPendente() {
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i];
       if (m.id.fromMe) return null; // já falei depois
-      if ((m.body || '').trim() === gatilho) {
+      if (new RegExp(gatilho).test((m.body || '').trim())) {
         const autor = m.author?._serialized || m.id.participant?._serialized;
         return { chatId: chat.id._serialized, msgId: m.id._serialized, autor, notifyName: m.notifyName, t: m.t };
       }

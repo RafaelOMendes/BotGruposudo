@@ -1,6 +1,6 @@
 # 🎙️ Bot do Gabreu
 
-Bot de WhatsApp que fica de olho no grupo **Gruposudo**: quando o **Gabriel Lassen** manda só `?`, ele responde (citando a mensagem) com o áudio [`audio/gabreu.ogg`](audio/gabreu.ogg) como mensagem de voz.
+Bot de WhatsApp que fica de olho no grupo **Gruposudo**: quando o **Gabriel Lassen** manda uma mensagem só de interrogações (`?`, `??`, `????`…), ele responde (citando a mensagem) com o áudio [`audio/gabreu.ogg`](audio/gabreu.ogg) como mensagem de voz.
 
 ## Como usar
 
