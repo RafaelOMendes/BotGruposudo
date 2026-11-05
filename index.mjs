@@ -3,6 +3,7 @@
 //     áudio em audio/gabreu.ogg (mensagem de voz).
 //  2. Nicolas manda figurinha ou imagem → o Claude (via `claude -p`, sem chave de API) decide se é non-sense; se for, responde
 //     com a figurinha em figurinhas/manda-figurinha.webp.
+//  3. Alguém marca o bot (@) num grupo → o Claude lê a mensagem (com o contexto recente) e responde.
 //
 // Usa Baileys (protocolo do WhatsApp direto, sem navegador). Os pedidos de reenvio que o
 // iPhone faz quando não consegue descriptografar ("Aguardando mensagem") são atendidos via getMessage.
@@ -24,7 +25,7 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { ehNonsense, iniciarIA } from './ia.mjs';
+import { ehNonsense, iniciarIA, responderMencao } from './ia.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -52,6 +53,13 @@ const CONFIG = {
   },
   // Caminho do Claude Code CLI (já logado). Padrão: `claude` no PATH.
   claude: process.env.CLAUDE_CLI_PATH || local.claude || 'claude',
+  mencao: {
+    ativo: local.mencao?.ativo ?? true,
+    // Intervalo mínimo entre respostas para a mesma pessoa.
+    intervaloSeg: local.mencao?.intervaloSeg ?? 10,
+    // Quantas mensagens recentes do grupo vão como contexto.
+    historico: local.mencao?.historico ?? 20,
+  },
 };
 
 // ---------- log ----------
@@ -86,12 +94,30 @@ for (const sinal of ['SIGINT', 'SIGTERM']) process.on(sinal, () => process.exit(
 const normalizar = (s) =>
   (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 
-const textoDa = (m) =>
-  m.message?.conversation ||
-  m.message?.extendedTextMessage?.text ||
-  m.message?.ephemeralMessage?.message?.conversation ||
-  m.message?.ephemeralMessage?.message?.extendedTextMessage?.text ||
-  '';
+const textoDa = (m) => {
+  const c = conteudo(m);
+  return c.conversation || c.extendedTextMessage?.text || c.imageMessage?.caption || c.videoMessage?.caption || '';
+};
+
+const contextoDa = (c) =>
+  c.extendedTextMessage?.contextInfo ||
+  c.imageMessage?.contextInfo ||
+  c.stickerMessage?.contextInfo ||
+  c.videoMessage?.contextInfo ||
+  c.audioMessage?.contextInfo ||
+  null;
+
+// Descrição curta de uma mensagem para o histórico ("[figurinha]", texto, legenda...).
+function resumo(c) {
+  const texto = c.conversation || c.extendedTextMessage?.text || '';
+  if (texto) return texto;
+  if (c.imageMessage) return `[imagem]${c.imageMessage.caption ? ' ' + c.imageMessage.caption : ''}`;
+  if (c.videoMessage) return `[vídeo]${c.videoMessage.caption ? ' ' + c.videoMessage.caption : ''}`;
+  if (c.stickerMessage) return '[figurinha]';
+  if (c.audioMessage) return '[áudio]';
+  if (c.documentMessage) return `[arquivo ${c.documentMessage.fileName || ''}]`.trim();
+  return '';
+}
 
 const audio = fs.readFileSync(CONFIG.audio);
 const figurinha = fs.existsSync(CONFIG.figurinha.arquivo) ? fs.readFileSync(CONFIG.figurinha.arquivo) : null;
@@ -201,6 +227,8 @@ async function iniciar() {
       log(`Bot pronto. Ouvindo "?" de ${CONFIG.remetente} em ${CONFIG.grupo}.`);
       if (!figurinha) log(`Figurinha não encontrada em ${CONFIG.figurinha.arquivo}; resposta a figurinhas desligada.`);
       else log(`Figurinhas de ${CONFIG.figurinha.remetente}: ${ia ? 'IA decide se é non-sense' : `claude CLI não encontrado, responde com chance ${CONFIG.figurinha.chanceSemIA}`}.`);
+      const ids = [sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => '…' + jidNormalizedUser(j).split('@')[0].slice(-4) + '@' + j.split('@')[1]);
+      log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
     }
     if (connection === 'close') {
       const codigo = lastDisconnect?.error?.output?.statusCode;
@@ -259,19 +287,109 @@ async function iniciar() {
     log(`Figurinha "manda figurinha" enviada em resposta a ${quem}.`);
   }
 
+  // ---------- @menção → Claude ----------
+  const meusIds = () => [sock.user?.id, sock.user?.lid].filter(Boolean).map(jidNormalizedUser);
+  const digitos = (jid) => jid.split('@')[0];
+
+  function meMarcaram(m) {
+    const ctx = contextoDa(conteudo(m));
+    const eu = meusIds();
+    if (ctx?.mentionedJid?.some((j) => eu.includes(jidNormalizedUser(j)))) return true;
+    const texto = textoDa(m);
+    return eu.some((id) => texto.includes('@' + digitos(id)));
+  }
+
+  async function baixar(msg) {
+    return downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+  }
+
+  let filaClaude = Promise.resolve(); // uma pergunta por vez para o claude
+  const ultimaMencao = new Map(); // autor -> timestamp
+
+  async function responderMarcacao(m, jid, meta) {
+    const autorId = m.key.participant || jid;
+    const autor = m.pushName || digitos(autorId);
+    if (Date.now() - (ultimaMencao.get(autorId) || 0) < CONFIG.mencao.intervaloSeg * 1000) {
+      log(`Marcação de ${autor} ignorada (intervalo mínimo).`);
+      return;
+    }
+    ultimaMencao.set(autorId, Date.now());
+    jaRespondidas.add(m.key.id);
+
+    let pedido = textoDa(m);
+    for (const id of meusIds()) pedido = pedido.split('@' + digitos(id)).join('').trim();
+
+    const c = conteudo(m);
+    const ctx = contextoDa(c);
+    const imagens = [];
+    if (c.imageMessage || c.stickerMessage) imagens.push(await baixar(m));
+
+    let citada = '';
+    if (ctx?.quotedMessage) {
+      const q = ctx.quotedMessage;
+      const quemCitado = ctx.participant && meusIds().includes(jidNormalizedUser(ctx.participant)) ? 'você (o bot)' : 'alguém do grupo';
+      citada = `${quemCitado}: ${resumo(q) || '[mensagem]'}`;
+      if (q.imageMessage || q.stickerMessage) {
+        try {
+          imagens.push(await baixar({ key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: q }));
+        } catch (e) {
+          log('Não deu para baixar a imagem citada:', e.message);
+        }
+      }
+    }
+
+    const hist = (historicos.get(jid) || []).slice(0, -1); // a própria mensagem vai separada
+    log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${imagens.length ? ` (+${imagens.length} imagem)` : ''}`);
+
+    const tarefa = async () => {
+      await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+      let resposta;
+      try {
+        resposta = await responderMencao({ grupo: meta.subject, historico: hist, autor, pedido, citada, imagens });
+      } catch (e) {
+        log('Erro ao perguntar ao claude:', e.message);
+        resposta = 'Travei aqui 😵‍💫 tenta de novo daqui a pouco.';
+      } finally {
+        await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+      }
+      const enviada = await sock.sendMessage(jid, { text: resposta }, { quoted: m });
+      guardarEnviada(enviada);
+      registrar(jid, 'Bot', resposta);
+      log(`Respondi ${autor}: "${resposta.slice(0, 80).replace(/\n/g, ' ')}"`);
+    };
+    filaClaude = filaClaude.then(tarefa).catch((e) => log('Erro ao responder marcação:', e.stack || e));
+  }
+
+  // Histórico curto por grupo (só em memória), usado como contexto para o Claude.
+  const historicos = new Map();
+  function registrar(jid, nome, texto) {
+    if (!texto) return;
+    const lista = historicos.get(jid) || [];
+    lista.push(`${nome}: ${texto.replace(/\s+/g, ' ').slice(0, 500)}`);
+    while (lista.length > CONFIG.mencao.historico + 1) lista.shift();
+    historicos.set(jid, lista);
+  }
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return; // 'append' = histórico sincronizado
     for (const m of messages) {
       try {
         const jid = m.key.remoteJid;
-        if (m.key.fromMe || !isJidGroup(jid) || jaRespondidas.has(m.key.id)) continue;
+        if (!isJidGroup(jid)) continue;
+        registrar(jid, m.key.fromMe ? 'Bot' : m.pushName || digitos(m.key.participant || ''), resumo(conteudo(m)));
+        if (m.key.fromMe || jaRespondidas.has(m.key.id)) continue;
 
         const idade = Date.now() / 1000 - Number(m.messageTimestamp || 0);
         if (idade > CONFIG.idadeMaxSeg) continue;
 
         const meta = await metadadosGrupo(jid);
-        if (normalizar(meta.subject) !== normalizar(CONFIG.grupo)) continue;
 
+        if (CONFIG.mencao.ativo && ia && meMarcaram(m)) {
+          await responderMarcacao(m, jid, meta);
+          continue;
+        }
+
+        if (normalizar(meta.subject) !== normalizar(CONFIG.grupo)) continue;
         await responderInterrogacao(m, jid);
         await responderFigurinha(m, jid);
       } catch (err) {

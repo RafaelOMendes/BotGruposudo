@@ -4,6 +4,7 @@ Bot de WhatsApp que fica de olho no grupo **Gruposudo**:
 
 - 🎙️ Quando o **Gabriel Lassen** manda uma mensagem só de interrogações (`?`, `??`, `????`…), responde (citando a mensagem) com o áudio [`audio/gabreu.ogg`](audio/gabreu.ogg) como mensagem de voz.
 - 🖼️ Quando o **Nicolas Bresolin** manda uma figurinha ou imagem, o Claude decide se ela é *non-sense* (via [Claude Code](https://claude.com/claude-code) no modo `claude -p`, usando o login que já está no PC; não precisa de chave de API). Se for, o bot responde com uma figurinha "manda figurinha de gente animal".
+- 💬 Quando alguém marca o bot (`@`) num grupo, o Claude lê a mensagem (com as últimas mensagens do grupo como contexto, a mensagem citada e imagens/figurinhas, se houver) e responde. Ele roda sem acesso a arquivos ou comandos do PC; a única ferramenta liberada é a busca na web.
 
 Feito com [Baileys](https://github.com/WhiskeySockets/Baileys), que fala o protocolo do WhatsApp direto (sem navegador). Os pedidos de reenvio dos aparelhos que não conseguem abrir a mensagem (o "Aguardando mensagem" do iPhone) são atendidos automaticamente.
 
@@ -35,6 +36,9 @@ Copie `config.example.json` para `config.json` (fica fora do git) e ajuste:
 | `figurinha.arquivo` | Figurinha de resposta: `.webp` 512×512 (a pasta `figurinhas/` fica fora do git) |
 | `figurinha.intervaloSeg` | Intervalo mínimo entre respostas com figurinha (padrão 60 s) |
 | `figurinha.chanceSemIA` | Se o `claude` não estiver instalado: chance de responder mesmo assim (1 = sempre, 0 = nunca) |
+| `mencao.ativo` | Liga/desliga as respostas quando marcam o bot (padrão: ligado) |
+| `mencao.intervaloSeg` | Intervalo mínimo entre respostas para a mesma pessoa (padrão 10 s) |
+| `mencao.historico` | Quantas mensagens recentes do grupo vão como contexto (padrão 20) |
 | `claude` | Caminho do Claude Code CLI (padrão: `claude` no PATH; ou variável `CLAUDE_CLI_PATH`) |
 
 Para criar uma figurinha a partir de qualquer imagem:

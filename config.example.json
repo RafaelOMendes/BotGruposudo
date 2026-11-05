@@ -13,5 +13,10 @@
     "arquivo": "figurinhas/manda-figurinha.webp",
     "intervaloSeg": 60,
     "chanceSemIA": 1
+  },
+  "mencao": {
+    "ativo": true,
+    "intervaloSeg": 10,
+    "historico": 20
   }
 }
