@@ -68,7 +68,7 @@ const CONFIG = {
 // ---------- log ----------
 const LOG_FILE = path.join(DIR, 'bot.log');
 function log(...args) {
-  const line = `[${new Date().toLocaleString('pt-BR')}] ${args.join(' ')}`;
+  const line = `[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ${args.join(' ')}`;
   console.log(line);
   fs.appendFileSync(LOG_FILE, line + '\n');
 }

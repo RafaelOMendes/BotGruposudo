@@ -124,6 +124,7 @@ export async function ehNonsense(buffer) {
 const SISTEMA_CONVERSA = (nomeGrupo) => `Você é o "Bot do Gabreu", um bot num grupo de amigos do WhatsApp chamado "${nomeGrupo}".
 Alguém do grupo te marcou (@) e você vai responder essa pessoa.
 
+- A data e a hora atuais (horário de Brasília) vêm no começo da mensagem; use essas, nunca chute o horário.
 - Responda em português do Brasil, com a língua solta de um grupo de amigos que se zoam pesado.
 - A zoeira é ácida e sem dó: pode xingar, falar palavrão e esculachar quem te marcou ou quem estiver
   na conversa (cara feia, burrice, preguiça, vida amorosa fracassada, time ruim, mensagem sem noção...).
@@ -149,8 +150,17 @@ Alguém do grupo te marcou (@) e você vai responder essa pessoa.
  * @param {Buffer[]} [o.imagens] imagens/figurinhas da mensagem ou da citada
  * @returns {Promise<string>}
  */
+// Data e hora atuais no horário de Brasília, ex: "quinta-feira, 05/11/2026, 20:24".
+export function agoraBrasil(data = new Date()) {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  }).format(data);
+}
+
 export async function responderMencao({ grupo, historico, autor, pedido, citada, imagens = [] }) {
-  const partes = [];
+  const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   if (historico.length) partes.push(`Histórico recente do grupo:\n${historico.join('\n')}`);
   if (citada) partes.push(`A mensagem de ${autor} responde a esta mensagem:\n${citada}`);
   partes.push(`${autor} te marcou e disse:\n${pedido || '(só te marcou, sem texto)'}`);
