@@ -2,7 +2,8 @@
 //  1. Gabriel manda uma mensagem só de interrogações ("?", "??", "????"...) → responde com o
 //     áudio em audio/gabreu.ogg (mensagem de voz).
 //  2. Nicolas manda figurinha ou imagem → o Claude (via `claude -p`, sem chave de API) decide se é non-sense; se for, responde
-//     com a figurinha em figurinhas/manda-figurinha.webp.
+//     com uma figurinha zoando: figurinhas/manda-figurinha.webp (para figurinha) ou
+//     figurinhas/manda-imagem.webp (para imagem).
 //  3. Alguém marca o bot (@) num grupo → o Claude lê a mensagem (com o contexto recente) e responde.
 //
 // Usa Baileys (protocolo do WhatsApp direto, sem navegador). Os pedidos de reenvio que o
@@ -45,7 +46,9 @@ const CONFIG = {
   figurinha: {
     remetente: local.figurinha?.remetente || 'Nicolas Bresolin',
     ids: (local.figurinha?.ids || []).map((s) => s.trim()),
+    // Resposta para figurinha e para imagem (webp 512×512).
     arquivo: path.join(DIR, local.figurinha?.arquivo || 'figurinhas/manda-figurinha.webp'),
+    arquivoImagem: path.join(DIR, local.figurinha?.arquivoImagem || 'figurinhas/manda-imagem.webp'),
     // Intervalo mínimo entre respostas (evita spam e gasto com a IA).
     intervaloSeg: local.figurinha?.intervaloSeg ?? 60,
     // Se o `claude` não estiver disponível: chance de responder mesmo assim (1 = sempre, 0 = nunca).
@@ -120,7 +123,11 @@ function resumo(c) {
 }
 
 const audio = fs.readFileSync(CONFIG.audio);
-const figurinha = fs.existsSync(CONFIG.figurinha.arquivo) ? fs.readFileSync(CONFIG.figurinha.arquivo) : null;
+const lerSeExistir = (f) => (fs.existsSync(f) ? fs.readFileSync(f) : null);
+const respostas = {
+  figurinha: { buffer: lerSeExistir(CONFIG.figurinha.arquivo), nome: 'manda figurinha', arquivo: CONFIG.figurinha.arquivo },
+  imagem: { buffer: lerSeExistir(CONFIG.figurinha.arquivoImagem), nome: 'manda imagem', arquivo: CONFIG.figurinha.arquivoImagem },
+};
 const ia = await iniciarIA(CONFIG.claude);
 
 // Desembrulha mensagens temporárias / de visualização única.
@@ -225,8 +232,8 @@ async function iniciar() {
     if (connection === 'open') {
       fecharQr();
       log(`Bot pronto. Ouvindo "?" de ${CONFIG.remetente} em ${CONFIG.grupo}.`);
-      if (!figurinha) log(`Figurinha não encontrada em ${CONFIG.figurinha.arquivo}; resposta a figurinhas desligada.`);
-      else log(`Figurinhas de ${CONFIG.figurinha.remetente}: ${ia ? 'IA decide se é non-sense' : `claude CLI não encontrado, responde com chance ${CONFIG.figurinha.chanceSemIA}`}.`);
+      for (const [tipo, r] of Object.entries(respostas)) if (!r.buffer) log(`Figurinha de resposta não encontrada em ${r.arquivo}; resposta a ${tipo} desligada.`);
+      log(`Figurinhas de ${CONFIG.figurinha.remetente}: ${ia ? 'IA decide se é non-sense' : `claude CLI não encontrado, responde com chance ${CONFIG.figurinha.chanceSemIA}`}.`);
       const ids = [sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => '…' + jidNormalizedUser(j).split('@')[0].slice(-4) + '@' + j.split('@')[1]);
       log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
     }
@@ -261,7 +268,7 @@ async function iniciar() {
   async function responderFigurinha(m, jid) {
     const c = conteudo(m);
     const tipo = c.stickerMessage ? 'figurinha' : c.imageMessage ? 'imagem' : null;
-    if (!tipo || !figurinha) return;
+    if (!tipo || !respostas[tipo].buffer) return;
     if (!ehDe(m, CONFIG.figurinha)) return;
 
     const quem = `${m.pushName || CONFIG.figurinha.remetente} (${m.key.participant})`;
@@ -282,9 +289,10 @@ async function iniciar() {
 
     ultimaFigurinha = Date.now();
     jaRespondidas.add(m.key.id);
-    const enviada = await sock.sendMessage(jid, { sticker: figurinha }, { quoted: m });
+    const resposta = respostas[tipo];
+    const enviada = await sock.sendMessage(jid, { sticker: resposta.buffer }, { quoted: m });
     guardarEnviada(enviada);
-    log(`Figurinha "manda figurinha" enviada em resposta a ${quem}.`);
+    log(`Figurinha "${resposta.nome}" enviada em resposta à ${tipo} de ${quem}.`);
   }
 
   // ---------- @menção → Claude ----------

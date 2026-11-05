@@ -11,6 +11,7 @@
       "123456789012345@lid"
     ],
     "arquivo": "figurinhas/manda-figurinha.webp",
+    "arquivoImagem": "figurinhas/manda-imagem.webp",
     "intervaloSeg": 60,
     "chanceSemIA": 1
   },
