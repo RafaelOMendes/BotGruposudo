@@ -1,4 +1,7 @@
 node_modules/
+.baileys_auth/
 .wwebjs_auth/
 .wwebjs_cache/
+config.json
+.bot.lock
 bot.log
