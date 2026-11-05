@@ -1,0 +1,17 @@
+{
+  "name": "bot-whats-audio-gabreu",
+  "version": "1.0.0",
+  "description": "Responde o \"?\" do Gabriel Lassen no Gruposudo com um áudio",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.7"
+  },
+  "private": true
+}
