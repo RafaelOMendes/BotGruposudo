@@ -4,7 +4,8 @@
 //  2. Nicolas manda figurinha ou imagem → o Claude (via `claude -p`, sem chave de API) decide se é non-sense; se for, responde
 //     com uma figurinha zoando: figurinhas/manda-figurinha.webp (para figurinha) ou
 //     figurinhas/manda-imagem.webp (para imagem).
-//  3. Alguém marca o bot (@) num grupo → o Claude lê a mensagem (com o contexto recente) e responde.
+//  3. Alguém marca o bot (@) num grupo → o Claude lê a mensagem (com o contexto recente) e responde,
+//     ou cria/apaga uma regra ("quando o Bernardo mandar X, faça Y"), salva em regras.json.
 //
 // Usa Baileys (protocolo do WhatsApp direto, sem navegador). Os pedidos de reenvio que o
 // iPhone faz quando não consegue descriptografar ("Aguardando mensagem") são atendidos via getMessage.
@@ -26,7 +27,9 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { ehNonsense, iniciarIA, responderMencao } from './ia.mjs';
+import { avaliarNonsense, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { catalogoParaPrompt, figurinhaDeMeme } from './memes.mjs';
+import { Regras } from './regras.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -129,6 +132,7 @@ const respostas = {
   imagem: { buffer: lerSeExistir(CONFIG.figurinha.arquivoImagem), nome: 'manda imagem', arquivo: CONFIG.figurinha.arquivoImagem },
 };
 const ia = await iniciarIA(CONFIG.claude);
+const regras = new Regras(DIR); // regras criadas pelo grupo (regras.json)
 
 // Desembrulha mensagens temporárias / de visualização única.
 function conteudo(m) {
@@ -279,19 +283,30 @@ async function iniciar() {
 
     let veredito;
     if (ia) {
-      const buffer = await downloadMediaMessage(m, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-      veredito = await ehNonsense(buffer);
+      const buffer = await baixar(m);
+      veredito = await avaliarNonsense(buffer, { autor: m.pushName || CONFIG.figurinha.remetente, tipo, catalogo: await catalogoParaPrompt() });
     } else {
-      veredito = { nonsense: Math.random() < CONFIG.figurinha.chanceSemIA, motivo: 'sem claude CLI' };
+      veredito = { nonsense: Math.random() < CONFIG.figurinha.chanceSemIA, motivo: 'sem claude CLI', resposta: 'padrao' };
     }
     log(`${tipo} de ${quem}: ${veredito.nonsense ? 'NON-SENSE' : 'normal'} — ${veredito.motivo}`);
     if (!veredito.nonsense) return;
 
     ultimaFigurinha = Date.now();
     jaRespondidas.add(m.key.id);
+
+    // O Claude escolheu montar um meme? Se der errado, cai na figurinha padrão.
+    if (veredito.resposta === 'meme' && veredito.meme_id) {
+      try {
+        const meme = await figurinhaDeMeme({ id: veredito.meme_id, cima: veredito.texto_cima, baixo: veredito.texto_baixo });
+        guardarEnviada(await sock.sendMessage(jid, { sticker: meme }, { quoted: m }));
+        log(`Meme ${veredito.meme_id} ("${veredito.texto_cima}" / "${veredito.texto_baixo}") enviado em resposta à ${tipo} de ${quem}.`);
+        return;
+      } catch (e) {
+        log('Não deu para montar o meme, mandando a figurinha padrão:', e.message);
+      }
+    }
     const resposta = respostas[tipo];
-    const enviada = await sock.sendMessage(jid, { sticker: resposta.buffer }, { quoted: m });
-    guardarEnviada(enviada);
+    guardarEnviada(await sock.sendMessage(jid, { sticker: resposta.buffer }, { quoted: m }));
     log(`Figurinha "${resposta.nome}" enviada em resposta à ${tipo} de ${quem}.`);
   }
 
@@ -349,23 +364,99 @@ async function iniciar() {
     const hist = (historicos.get(jid) || []).slice(0, -1); // a própria mensagem vai separada
     log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${imagens.length ? ` (+${imagens.length} imagem)` : ''}`);
 
+    // Pessoas marcadas na mensagem (fora o bot): viram os IDs do remetente se a pessoa criar uma regra.
+    const outrosMarcados = (ctx?.mentionedJid || []).map(jidNormalizedUser).filter((j) => !meusIds().includes(j));
+
     const tarefa = async () => {
       await sock.sendPresenceUpdate('composing', jid).catch(() => {});
       let resposta;
       try {
-        resposta = await responderMencao({ grupo: meta.subject, historico: hist, autor, pedido, citada, imagens });
+        const v = await interpretarMencao({
+          grupo: meta.subject, historico: hist, autor, pedido, citada, imagens, regras: regras.resumo(jid),
+        });
+        resposta = v.texto;
+        if (v.acao === 'criar_regra') {
+          const remetente = { nome: v.regra_remetente || '', ids: v.regra_remetente ? outrosMarcados : [] };
+          const r = regras.criar(jid, v, remetente, autor);
+          if (r.ok) log(`Regra ${r.regra.id} criada por ${autor}: ${r.regra.descricao}`);
+          else {
+            log(`Regra recusada (${r.erro}) pedida por ${autor}.`);
+            resposta = `Não criei essa regra: ${r.erro}.`;
+          }
+        } else if (v.acao === 'apagar_regra') {
+          const ok = regras.apagar(jid, v.regra_apagar_id);
+          log(`Regra ${v.regra_apagar_id} ${ok ? 'apagada' : 'não encontrada'} (pedido de ${autor}).`);
+          if (!ok) resposta = `Não achei a regra "${v.regra_apagar_id}".`;
+        }
       } catch (e) {
         log('Erro ao perguntar ao claude:', e.message);
-        resposta = 'Travei aqui 😵‍💫 tenta de novo daqui a pouco.';
+        resposta = 'Travei aqui, tenta de novo daqui a pouco.';
       } finally {
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
       }
+      if (!resposta) return;
       const enviada = await sock.sendMessage(jid, { text: resposta }, { quoted: m });
       guardarEnviada(enviada);
       registrar(jid, 'Bot', resposta);
       log(`Respondi ${autor}: "${resposta.slice(0, 80).replace(/\n/g, ' ')}"`);
     };
     filaClaude = filaClaude.then(tarefa).catch((e) => log('Erro ao responder marcação:', e.stack || e));
+  }
+
+  // ---------- regras criadas pelo grupo ----------
+  function tipoDaMensagem(c) {
+    if (c.stickerMessage) return 'figurinha';
+    if (c.imageMessage) return 'imagem';
+    if (c.audioMessage) return 'audio';
+    if (c.videoMessage) return 'video';
+    if (c.conversation || c.extendedTextMessage) return 'texto';
+    return null;
+  }
+
+  async function aplicarRegras(m, jid, meta) {
+    const c = conteudo(m);
+    const tipo = tipoDaMensagem(c);
+    if (!tipo) return false;
+    const autor = m.pushName || digitos(m.key.participant || '');
+    const texto = textoDa(m);
+    const disparadas = regras.disparadas({
+      jid, tipo, texto, autorNome: autor,
+      autorIds: [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser),
+    });
+    if (!disparadas.length) return false;
+    jaRespondidas.add(m.key.id);
+
+    for (const regra of disparadas.slice(0, 2)) {
+      log(`Regra ${regra.id} disparada por ${autor}: ${regra.descricao}`);
+      const executar = async () => {
+        const { tipo: acao, conteudo: arg } = regra.acao;
+        const imagens = c.imageMessage || c.stickerMessage ? [await baixar(m)] : [];
+        if (acao === 'texto') {
+          guardarEnviada(await sock.sendMessage(jid, { text: arg }, { quoted: m }));
+          registrar(jid, 'Bot', arg);
+        } else if (acao === 'audio_gabreu') {
+          guardarEnviada(await sock.sendMessage(jid, { audio, mimetype: 'audio/ogg; codecs=opus', ptt: true }, { quoted: m }));
+        } else if (acao === 'figurinha_padrao') {
+          const fig = respostas[tipo === 'imagem' ? 'imagem' : 'figurinha'].buffer || respostas.figurinha.buffer;
+          if (fig) guardarEnviada(await sock.sendMessage(jid, { sticker: fig }, { quoted: m }));
+        } else if (acao === 'meme' && ia) {
+          const v = await memeDeRegra({ grupo: meta.subject, autor, mensagem: texto, instrucao: arg, imagens, catalogo: await catalogoParaPrompt() });
+          const meme = await figurinhaDeMeme({ id: v.meme_id, cima: v.texto_cima, baixo: v.texto_baixo });
+          guardarEnviada(await sock.sendMessage(jid, { sticker: meme }, { quoted: m }));
+        } else if (acao === 'ia' && ia) {
+          await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+          const hist = (historicos.get(jid) || []).slice(0, -1);
+          const resposta = await respostaDeRegra({ grupo: meta.subject, historico: hist, autor, mensagem: texto, instrucao: arg, imagens });
+          await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+          guardarEnviada(await sock.sendMessage(jid, { text: resposta }, { quoted: m }));
+          registrar(jid, 'Bot', resposta);
+        }
+      };
+      const precisaClaude = ['ia', 'meme'].includes(regra.acao.tipo);
+      if (precisaClaude) filaClaude = filaClaude.then(executar).catch((e) => log(`Erro na regra ${regra.id}:`, e.message));
+      else await executar().catch((e) => log(`Erro na regra ${regra.id}:`, e.message));
+    }
+    return true;
   }
 
   // Histórico curto por grupo (só em memória), usado como contexto para o Claude.
@@ -396,6 +487,8 @@ async function iniciar() {
           await responderMarcacao(m, jid, meta);
           continue;
         }
+
+        if (await aplicarRegras(m, jid, meta)) continue;
 
         if (normalizar(meta.subject) !== normalizar(CONFIG.grupo)) continue;
         await responderInterrogacao(m, jid);

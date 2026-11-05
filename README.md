@@ -3,8 +3,30 @@
 Bot de WhatsApp que fica de olho no grupo **Gruposudo**:
 
 - 🎙️ Quando o **Gabriel Lassen** manda uma mensagem só de interrogações (`?`, `??`, `????`…), responde (citando a mensagem) com o áudio [`audio/gabreu.ogg`](audio/gabreu.ogg) como mensagem de voz.
-- 🖼️ Quando o **Nicolas Bresolin** manda uma figurinha ou imagem, o Claude decide se ela é *non-sense* (via [Claude Code](https://claude.com/claude-code) no modo `claude -p`, usando o login que já está no PC; não precisa de chave de API). Se for, o bot responde com uma figurinha zoando: "manda figurinha de gente animal" para figurinha e "manda imagem de gente animal" para imagem.
+- 🖼️ Quando o **Nicolas Bresolin** manda uma figurinha ou imagem, o Claude decide se ela é *non-sense* (via [Claude Code](https://claude.com/claude-code) no modo `claude -p`, usando o login que já está no PC; não precisa de chave de API). Se for, o próprio Claude escolhe a resposta: a figurinha clássica ("manda figurinha de gente animal" para figurinha, "manda imagem de gente animal" para imagem) ou um **meme novo** que ele monta na hora, escolhendo um template popular do [Imgflip](https://imgflip.com/memetemplates) e escrevendo o texto zoando.
 - 💬 Quando alguém marca o bot (`@`) num grupo, o Claude lê a mensagem (com as últimas mensagens do grupo como contexto, a mensagem citada e imagens/figurinhas, se houver) e responde. Ele roda sem acesso a arquivos ou comandos do PC; a única ferramenta liberada é a busca na web.
+- 🧩 **O grupo cria regras novas** marcando o bot, em linguagem normal (veja abaixo).
+
+## Regras criadas pelo grupo
+
+Qualquer pessoa marca o bot e pede, por exemplo:
+
+- `@bot quando o Bernardo mandar bom dia, xinga ele de preguiçoso`
+- `@bot toda vez que o @Joao mandar áudio, responde com um meme zoando`
+- `@bot quando alguém falar "churrasco", manda o áudio do Gabreu`
+- `@bot quais regras tem?` / `@bot apaga a regra do Bernardo`
+
+O Claude transforma o pedido numa regra (quem, que tipo de mensagem, qual texto) e numa ação:
+
+| Ação | O que o bot faz |
+| --- | --- |
+| `texto` | manda sempre o mesmo texto |
+| `ia` | o Claude escreve uma resposta na hora, seguindo a instrução da regra |
+| `meme` | o Claude monta um meme zoando a mensagem |
+| `figurinha_padrao` | manda a figurinha clássica |
+| `audio_gabreu` | manda o áudio do Gabreu |
+
+As regras ficam em `regras.json` (fora do git), valem só no grupo onde foram criadas, têm intervalo de 30 s entre disparos e são no máximo 30 por grupo. Regras vagas demais (qualquer pessoa + qualquer mensagem) são recusadas. Marcar a pessoa com `@` ao criar a regra identifica ela pelo ID, que é mais confiável que o nome.
 
 Feito com [Baileys](https://github.com/WhiskeySockets/Baileys), que fala o protocolo do WhatsApp direto (sem navegador). Os pedidos de reenvio dos aparelhos que não conseguem abrir a mensagem (o "Aguardando mensagem" do iPhone) são atendidos automaticamente.
 
