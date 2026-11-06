@@ -49,7 +49,7 @@ Depois disso, feche o terminal (Ctrl+C). A partir daí o bot sobe sozinho quando
 
 ## Inicialização automática
 
-Um atalho `BotWhatsAudioGabreu.lnk` em `shell:startup` executa `start-oculto.vbs`, que roda `start.cmd` sem janela. O `start.cmd` reinicia o bot se ele cair (e para se já houver outra instância rodando ou se a sessão for desconectada pelo celular).
+Um atalho `BotGruposudo.lnk` em `shell:startup` executa `start-oculto.vbs`, que roda `start.cmd` sem janela. O `start.cmd` reinicia o bot se ele cair (e para se já houver outra instância rodando ou se a sessão for desconectada pelo celular).
 
 ## Configuração
 
