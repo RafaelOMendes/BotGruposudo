@@ -65,7 +65,7 @@ const CONFIG = {
   // Geração de imagem local (ComfyUI + Z-Image Turbo na placa de vídeo).
   gerador: {
     ativo: local.gerador?.ativo ?? true,
-    pasta: local.gerador?.pasta || 'D:/IA/ComfyUI_windows_portable',
+    pasta: local.gerador?.pasta || 'E:/IA/ComfyUI_windows_portable',
     porta: local.gerador?.porta ?? 8188,
     liberarVramMin: local.gerador?.liberarVramMin ?? 5,
   },

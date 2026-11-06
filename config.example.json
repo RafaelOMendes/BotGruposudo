@@ -34,5 +34,11 @@
       "modelo": "claude-sonnet-5-5",
       "esforco": "medium"
     }
+  },
+  "gerador": {
+    "ativo": true,
+    "pasta": "E:/IA/ComfyUI_windows_portable",
+    "porta": 8188,
+    "liberarVramMin": 5
   }
 }
