@@ -92,6 +92,7 @@ const nomeDoArquivo = (url, padrao) => decodeURIComponent(path.basename(new URL(
 // ---------- yt-dlp (opcional) ----------
 const SITES_VIDEO = /(^|\.)(youtube\.com|youtu\.be|tiktok\.com|instagram\.com|twitter\.com|x\.com|reddit\.com|redd\.it|facebook\.com|fb\.watch|vimeo\.com|twitch\.tv|kwai\.com|dailymotion\.com|soundcloud\.com)$/i;
 let ytdlp = null;
+let ffmpeg = null;
 
 function rodar(cmd, args, cwd, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -105,14 +106,40 @@ function rodar(cmd, args, cwd, timeoutMs) {
 }
 
 /** Procura o yt-dlp (e diz se dá para juntar áudio+vídeo, o que precisa do ffmpeg). */
-export async function iniciarDownloads(caminho = 'yt-dlp') {
+export async function iniciarDownloads(caminho = 'yt-dlp', caminhoFfmpeg = 'ffmpeg') {
   try {
     await rodar(caminho, ['--version'], os.tmpdir(), 20_000);
     ytdlp = caminho;
   } catch {
     ytdlp = null;
   }
-  return { ytdlp: !!ytdlp };
+  try {
+    await rodar(caminhoFfmpeg, ['-version'], os.tmpdir(), 20_000);
+    ffmpeg = caminhoFfmpeg;
+  } catch {
+    ffmpeg = null;
+  }
+  return { ytdlp: !!ytdlp, ffmpeg: !!ffmpeg };
+}
+
+/** Converte GIF/vídeo para MP4 (H.264 + AAC) que o WhatsApp toca. Precisa do ffmpeg. */
+async function paraMp4(buffer, extEntrada, { semAudio = false } = {}) {
+  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-ff-'));
+  try {
+    const entrada = path.join(pasta, `in.${extEntrada || 'bin'}`);
+    fs.writeFileSync(entrada, buffer);
+    await rodar(ffmpeg, [
+      '-y', '-i', entrada,
+      '-movflags', '+faststart', '-pix_fmt', 'yuv420p',
+      '-vf', 'scale=trunc(min(iw\\,1280)/2)*2:-2', // largura par e no máx. 1280 (a vírgula precisa de escape)
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      ...(semAudio ? ['-an'] : ['-c:a', 'aac', '-b:a', '128k']),
+      'saida.mp4',
+    ], pasta, 3 * 60_000);
+    return fs.readFileSync(path.join(pasta, 'saida.mp4'));
+  } finally {
+    fs.rmSync(pasta, { recursive: true, force: true });
+  }
 }
 export const temDownloaderDeVideo = () => !!ytdlp;
 export const ehSiteDeVideo = (url) => { try { return SITES_VIDEO.test(new URL(url).hostname); } catch { return false; } };
@@ -151,7 +178,7 @@ async function comoImagem(buffer) {
     .toBuffer();
 }
 
-// GIF vira figurinha animada (o WhatsApp só toca "GIF" como vídeo mp4, que exigiria ffmpeg).
+// Sem ffmpeg, GIF vira figurinha animada (o WhatsApp só toca "GIF" como vídeo mp4).
 async function gifComoFigurinha(buffer) {
   return sharp(buffer, { animated: true })
     .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
@@ -168,8 +195,9 @@ export async function prepararAnexo({ url, tipo, nome }, legenda = '') {
   if ((tipo === 'video' || tipo === 'audio') && ehSiteDeVideo(url)) {
     const { buffer, ext } = await baixarComYtdlp(url, tipo);
     if (tipo === 'audio') return { audio: buffer, mimetype: ext === 'mp3' ? 'audio/mpeg' : 'audio/mp4' };
-    if (ext !== 'mp4') return { document: buffer, mimetype: `video/${ext}`, fileName: `video.${ext}`, caption: legenda };
-    return { video: buffer, mimetype: 'video/mp4', caption: legenda };
+    if (ext === 'mp4') return { video: buffer, mimetype: 'video/mp4', caption: legenda };
+    if (ffmpeg) return { video: await paraMp4(buffer, ext), mimetype: 'video/mp4', caption: legenda };
+    return { document: buffer, mimetype: `video/${ext}`, fileName: `video.${ext}`, caption: legenda };
   }
 
   const ext = extensao(url);
@@ -180,12 +208,18 @@ export async function prepararAnexo({ url, tipo, nome }, legenda = '') {
   if (tipo === 'gif') {
     const { buffer, tipo: mime } = await baixarBytes(url, LIMITE.gif);
     if (mime === 'video/mp4' || ext === 'mp4') return { video: buffer, mimetype: 'video/mp4', gifPlayback: true, caption: legenda };
+    if (ffmpeg) {
+      try {
+        return { video: await paraMp4(buffer, ext || 'gif', { semAudio: true }), mimetype: 'video/mp4', gifPlayback: true, caption: legenda };
+      } catch { /* cai na figurinha animada */ }
+    }
     return { sticker: await gifComoFigurinha(buffer) };
   }
   if (tipo === 'video') {
     const { buffer, tipo: mime } = await baixarBytes(url, LIMITE.video);
     if (!mime.startsWith('video/') && ext !== 'mp4') throw new Error(`não é vídeo (${mime || 'tipo desconhecido'})`);
     if (mime === 'video/mp4' || ext === 'mp4') return { video: buffer, mimetype: 'video/mp4', caption: legenda };
+    if (ffmpeg) return { video: await paraMp4(buffer, ext || mime.split('/')[1]), mimetype: 'video/mp4', caption: legenda };
     return { document: buffer, mimetype: mime, fileName: nome || nomeDoArquivo(url, 'video'), caption: legenda };
   }
   if (tipo === 'audio') {

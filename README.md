@@ -4,7 +4,7 @@ Bot de WhatsApp que fica de olho no grupo **Gruposudo**:
 
 - 🎙️ Quando o **Gabriel Lassen** manda uma mensagem só de interrogações (`?`, `??`, `????`…), responde (citando a mensagem) com o áudio [`audio/gabreu.ogg`](audio/gabreu.ogg) como mensagem de voz.
 - 🖼️ Quando o **Nicolas Bresolin** manda uma figurinha ou imagem, o Claude decide se ela é *non-sense* (via [Claude Code](https://claude.com/claude-code) no modo `claude -p`, usando o login que já está no PC; não precisa de chave de API). Se for, o próprio Claude escolhe a resposta: a figurinha clássica ("manda figurinha de gente animal" para figurinha, "manda imagem de gente animal" para imagem) ou um **meme novo** que ele monta na hora, escolhendo um template popular do [Imgflip](https://imgflip.com/memetemplates) e escrevendo o texto zoando.
-- 💬 Quando alguém marca o bot (`@`) num grupo, o Claude lê a mensagem (com as últimas mensagens do grupo como contexto, a mensagem citada e imagens/figurinhas, se houver) e responde no mesmo tom de quem falou (pergunta séria → resposta direta; provocação → zoeira de volta). Quando pedem para pesquisar ou mandar algo, ele pesquisa de verdade na web e **baixa e envia o conteúdo**: imagem, GIF (vai como figurinha animada), vídeo MP4, áudio, PDF/documentos. Vídeos e músicas de YouTube, TikTok, Instagram, X etc. são baixados com o [yt-dlp](https://github.com/yt-dlp/yt-dlp) se ele estiver instalado (até 15 min e ~45 MB); sem ele, o bot manda o link. O Claude roda sem acesso a arquivos ou comandos do PC (só à web), e os downloads só aceitam https de endereços públicos, com limite de tamanho, e documentos só em formatos inofensivos (PDF, Office, TXT...; nada de .exe/.bat/.apk).
+- 💬 Quando alguém marca o bot (`@`) num grupo, o Claude lê a mensagem (com as últimas mensagens do grupo como contexto, a mensagem citada e imagens/figurinhas, se houver) e responde no mesmo tom de quem falou (pergunta séria → resposta direta; provocação → zoeira de volta). Quando pedem para pesquisar ou mandar algo, ele pesquisa de verdade na web e **baixa e envia o conteúdo**: imagem, GIF, vídeo, áudio, PDF/documentos. Vídeos e músicas de YouTube, TikTok, Instagram, X etc. são baixados com o [yt-dlp](https://github.com/yt-dlp/yt-dlp) (até 15 min e ~45 MB), e o [ffmpeg](https://ffmpeg.org) converte GIF/WebM para MP4 que o WhatsApp toca. Sem o yt-dlp o bot manda o link; sem o ffmpeg o GIF vai como figurinha animada. No Windows: `winget install yt-dlp.yt-dlp Gyan.FFmpeg`. O Claude roda sem acesso a arquivos ou comandos do PC (só à web), e os downloads só aceitam https de endereços públicos, com limite de tamanho, e documentos só em formatos inofensivos (PDF, Office, TXT...; nada de .exe/.bat/.apk).
 - 🧩 **O grupo cria regras novas** marcando o bot, em linguagem normal (veja abaixo).
 
 ## Regras criadas pelo grupo
@@ -62,7 +62,7 @@ Copie `config.example.json` para `config.json` (fica fora do git) e ajuste:
 | `mencao.ativo` | Liga/desliga as respostas quando marcam o bot (padrão: ligado) |
 | `mencao.intervaloSeg` | Intervalo mínimo entre respostas para a mesma pessoa (padrão 10 s) |
 | `mencao.historico` | Quantas mensagens recentes do grupo vão como contexto (padrão 20) |
-| `ytdlp` | Caminho do yt-dlp (padrão: `yt-dlp` no PATH; ou variável `YTDLP_PATH`) |
+| `ytdlp` / `ffmpeg` | Caminhos do yt-dlp e do ffmpeg (padrão: no PATH; ou variáveis `YTDLP_PATH` / `FFMPEG_PATH`) |
 | `claude` | Caminho do Claude Code CLI (padrão: `claude` no PATH; ou variável `CLAUDE_CLI_PATH`) |
 
 Para criar uma figurinha a partir de qualquer imagem:

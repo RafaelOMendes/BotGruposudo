@@ -134,7 +134,10 @@ const respostas = {
 };
 const ia = await iniciarIA(CONFIG.claude);
 const regras = new Regras(DIR); // regras criadas pelo grupo (regras.json)
-const downloads = await iniciarDownloads(process.env.YTDLP_PATH || local.ytdlp || 'yt-dlp');
+const downloads = await iniciarDownloads(
+  process.env.YTDLP_PATH || local.ytdlp || 'yt-dlp',
+  process.env.FFMPEG_PATH || local.ffmpeg || 'ffmpeg'
+);
 
 // Desembrulha mensagens temporárias / de visualização única.
 function conteudo(m) {
@@ -241,7 +244,7 @@ async function iniciar() {
       for (const [tipo, r] of Object.entries(respostas)) if (!r.buffer) log(`Figurinha de resposta não encontrada em ${r.arquivo}; resposta a ${tipo} desligada.`);
       log(`Figurinhas de ${CONFIG.figurinha.remetente}: ${ia ? 'IA decide se é non-sense' : `claude CLI não encontrado, responde com chance ${CONFIG.figurinha.chanceSemIA}`}.`);
       const ids = [sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => '…' + jidNormalizedUser(j).split('@')[0].slice(-4) + '@' + j.split('@')[1]);
-      log(`Download de vídeos de sites (yt-dlp): ${downloads.ytdlp ? 'ligado' : 'desligado (yt-dlp não encontrado)'}.`);
+      log(`Downloads: yt-dlp ${downloads.ytdlp ? 'ok' : 'não encontrado (vídeos de sites viram link)'}, ffmpeg ${downloads.ffmpeg ? 'ok' : 'não encontrado (GIF vira figurinha)'}.`);
       log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
     }
     if (connection === 'close') {
