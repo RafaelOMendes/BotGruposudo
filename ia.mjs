@@ -198,16 +198,29 @@ const SCHEMA_MENCAO = {
     regra_acao_tipo: { type: 'string', enum: TIPOS_ACAO },
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
     regra_apagar_id: { type: 'string' },
-    imagem_url: { type: 'string', description: 'URL https direta de uma imagem (.jpg/.png/.webp/.gif) para mandar junto, ou ""' },
+    anexos: {
+      type: 'array',
+      description: 'conteúdos para baixar e mandar no grupo (máx. 3); [] se não houver',
+      items: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          tipo: { type: 'string', enum: ['imagem', 'gif', 'video', 'audio', 'documento'] },
+          nome: { type: 'string', description: 'nome do arquivo (documentos), ou ""' },
+        },
+        required: ['url', 'tipo', 'nome'],
+        additionalProperties: false,
+      },
+    },
   },
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
-    'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'imagem_url',
+    'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
   ],
   additionalProperties: false,
 };
 
-const SISTEMA_MENCAO = (grupo) => `Você é o "Bot do Gabreu", um bot num grupo de amigos do WhatsApp chamado "${grupo}".
+const SISTEMA_MENCAO = (grupo, temVideo) => `Você é o "Bot do Gabreu", um bot num grupo de amigos do WhatsApp chamado "${grupo}".
 Alguém te marcou (@). Decida a ação:
 
 - "responder": conversa normal. Responda o que pediram, no mesmo tom de quem falou.
@@ -218,9 +231,15 @@ mostrar alguma coisa (notícia, placar, preço, link, informação, imagem, meme
   2. Entregue o resultado de verdade: os fatos, números, nomes e links que achou. A zoeira vira no
      máximo uma frase curta no começo ou no fim; nunca substitui a resposta e nunca é ironia no lugar dela.
   3. Nunca diga que pesquisou se não pesquisou. Se não achou, diga o que buscou e o que encontrou de mais próximo.
-  4. Se pedirem uma imagem (foto, meme, print...), ache uma URL https DIRETA do arquivo de imagem
-     (termina em .jpg, .jpeg, .png, .webp ou .gif, ou é claramente o arquivo da imagem) e coloque em
-     imagem_url; o texto vira a legenda. Se não achar uma URL direta, mande o link da página no texto.
+  4. Se pedirem para MANDAR um conteúdo (foto, meme, gif, vídeo, música/áudio, PDF, documento...),
+     o bot baixa e envia o arquivo de verdade no grupo. Coloque cada um em "anexos" com o tipo certo:
+     - imagem / gif / documento / audio / video de arquivo: URL https DIRETA do arquivo (ex: termina em
+       .jpg, .png, .webp, .gif, .mp4, .mp3, .m4a, .pdf, .docx... ou é claramente o arquivo, como
+       upload.wikimedia.org ou i.imgur.com). Use WebFetch na página para achar a URL do arquivo.
+     - video / audio de sites (YouTube, TikTok, Instagram, X, Reddit, Facebook, Vimeo, SoundCloud):
+       {{VIDEO}}
+     O texto vira a legenda/mensagem junto. Não diga que mandou algo que não está em "anexos". Se não
+     achar um arquivo que dê para baixar, diga isso e mande o link da página no texto.
   5. Se o pedido for vago, use o histórico do grupo para entender do que se trata; só pergunte se
      realmente não der para saber.
 
@@ -240,7 +259,7 @@ mostrar alguma coisa (notícia, placar, preço, link, informação, imagem, meme
   de um jeito curto e zoeiro.
 - "apagar_regra": a pessoa quer remover uma regra; preencha regra_apagar_id com o id da lista abaixo.
   Para listar as regras, use "responder" e escreva a lista no texto.
-Campos que não se aplicam: "" (ou "qualquer"/"nenhum"/"texto" nos enums); imagem_url = "" quando não houver imagem.
+Campos que não se aplicam: "" (ou "qualquer"/"nenhum"/"texto" nos enums); anexos = [] quando não houver conteúdo para mandar.
 
 O texto vai direto para o WhatsApp: curto (1 a 4 frases, salvo se pedirem algo maior), formatação do
 WhatsApp (*negrito*, _itálico_, listas com "- "), nada de # nem tabelas.
@@ -261,7 +280,7 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   partes.push(`Regras ativas neste grupo (id | descrição):\n${regras || '(nenhuma)'}`);
   if (historico.length) partes.push(`Histórico recente do grupo:\n${historico.join('\n')}`);
@@ -270,7 +289,9 @@ export async function interpretarMencao({ grupo, historico, autor, pedido, citad
   if (imagens.length) partes.push(`(${imagens.length} imagem(ns) anexada(s) acima.)`);
 
   const r = await perguntar({
-    sistema: SISTEMA_MENCAO(grupo),
+    sistema: SISTEMA_MENCAO(grupo, temVideo).replace('{{VIDEO}}', temVideo
+      ? 'a URL da página do vídeo/música serve: o bot baixa com o yt-dlp (até 15 min e ~45 MB).'
+      : 'o bot ainda NÃO consegue baixar desses sites; mande o link no texto em vez de anexo.'),
     conteudo: await conteudoCom(imagens, partes.join('\n\n')),
     schema: SCHEMA_MENCAO,
     ferramentas: ['WebSearch', 'WebFetch'],

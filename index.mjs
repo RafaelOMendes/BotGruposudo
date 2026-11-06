@@ -30,7 +30,7 @@ import makeWASocket, {
 import { avaliarNonsense, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { catalogoParaPrompt, figurinhaDeMeme } from './memes.mjs';
 import { Regras } from './regras.mjs';
-import { baixarImagemDaWeb } from './web.mjs';
+import { iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -134,6 +134,7 @@ const respostas = {
 };
 const ia = await iniciarIA(CONFIG.claude);
 const regras = new Regras(DIR); // regras criadas pelo grupo (regras.json)
+const downloads = await iniciarDownloads(process.env.YTDLP_PATH || local.ytdlp || 'yt-dlp');
 
 // Desembrulha mensagens temporárias / de visualização única.
 function conteudo(m) {
@@ -240,6 +241,7 @@ async function iniciar() {
       for (const [tipo, r] of Object.entries(respostas)) if (!r.buffer) log(`Figurinha de resposta não encontrada em ${r.arquivo}; resposta a ${tipo} desligada.`);
       log(`Figurinhas de ${CONFIG.figurinha.remetente}: ${ia ? 'IA decide se é non-sense' : `claude CLI não encontrado, responde com chance ${CONFIG.figurinha.chanceSemIA}`}.`);
       const ids = [sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => '…' + jidNormalizedUser(j).split('@')[0].slice(-4) + '@' + j.split('@')[1]);
+      log(`Download de vídeos de sites (yt-dlp): ${downloads.ytdlp ? 'ligado' : 'desligado (yt-dlp não encontrado)'}.`);
       log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
     }
     if (connection === 'close') {
@@ -371,13 +373,14 @@ async function iniciar() {
     const tarefa = async () => {
       await sock.sendPresenceUpdate('composing', jid).catch(() => {});
       let resposta;
-      let imagemUrl = '';
+      let anexos = [];
       try {
         const v = await interpretarMencao({
           grupo: meta.subject, historico: hist, autor, pedido, citada, imagens, regras: regras.resumo(jid),
+          temVideo: temDownloaderDeVideo(),
         });
         resposta = v.texto;
-        if (v.acao === 'responder' && v.imagem_url) imagemUrl = v.imagem_url;
+        if (v.acao === 'responder' && Array.isArray(v.anexos)) anexos = v.anexos.filter((a) => a?.url).slice(0, 3);
         if (v.acao === 'criar_regra') {
           const remetente = { nome: v.regra_remetente || '', ids: v.regra_remetente ? outrosMarcados : [] };
           const r = regras.criar(jid, v, remetente, autor);
@@ -391,27 +394,38 @@ async function iniciar() {
           log(`Regra ${v.regra_apagar_id} ${ok ? 'apagada' : 'não encontrada'} (pedido de ${autor}).`);
           if (!ok) resposta = `Não achei a regra "${v.regra_apagar_id}".`;
         }
+
+        // Baixa o que o Claude pediu para mandar (com as travas de segurança do web.mjs).
+        const prontos = [];
+        const falhas = [];
+        for (const a of anexos) {
+          try {
+            prontos.push(await prepararAnexo(a, ''));
+            log(`Baixei ${a.tipo}: ${a.url}`);
+          } catch (e) {
+            log(`Não deu para baixar ${a.tipo} (${e.message}): ${a.url}`);
+            falhas.push(`${a.url} (${e.message})`);
+          }
+        }
+        anexos = prontos;
+        if (falhas.length) resposta = `${resposta || ''}\n\nNão consegui baixar:\n${falhas.map((f) => '- ' + f).join('\n')}`.trim();
       } catch (e) {
         log('Erro ao perguntar ao claude:', e.message);
         resposta = 'Travei aqui, tenta de novo daqui a pouco.';
+        anexos = [];
       } finally {
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
       }
-      if (!resposta && !imagemUrl) return;
-      let conteudoMsg = { text: resposta };
-      if (imagemUrl) {
-        try {
-          conteudoMsg = { image: await baixarImagemDaWeb(imagemUrl), caption: resposta };
-          log(`Imagem da web baixada: ${imagemUrl}`);
-        } catch (e) {
-          log(`Não deu para baixar a imagem (${e.message}): ${imagemUrl}`);
-          conteudoMsg = { text: `${resposta}\n\n${imagemUrl}`.trim() };
-        }
+      if (!resposta && !anexos.length) return;
+
+      // Se o primeiro anexo aceita legenda, o texto vai nele; senão vai antes, numa mensagem própria.
+      if (anexos.length && 'caption' in anexos[0] && resposta && resposta.length <= 1000) anexos[0].caption = resposta;
+      else if (resposta) guardarEnviada(await sock.sendMessage(jid, { text: resposta }, { quoted: m }));
+      for (const [i, anexo] of anexos.entries()) {
+        guardarEnviada(await sock.sendMessage(jid, anexo, i === 0 ? { quoted: m } : {}));
       }
-      const enviada = await sock.sendMessage(jid, conteudoMsg, { quoted: m });
-      guardarEnviada(enviada);
-      registrar(jid, 'Bot', resposta);
-      log(`Respondi ${autor}: "${resposta.slice(0, 80).replace(/\n/g, ' ')}"`);
+      registrar(jid, 'Bot', resposta || '[anexo]');
+      log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}`);
     };
     filaClaude = filaClaude.then(tarefa).catch((e) => log('Erro ao responder marcação:', e.stack || e));
   }
