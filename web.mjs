@@ -167,6 +167,31 @@ export async function iniciarDownloads(caminho = 'yt-dlp', caminhoFfmpeg = 'ffmp
 }
 
 /** Converte GIF/vídeo para MP4 (H.264 + AAC) que o WhatsApp toca. Precisa do ffmpeg. */
+/** true se o vídeo já é H.264 (yuv420p) com áudio AAC (ou sem áudio): o formato que todo celular toca. */
+async function tocaNoWhatsapp(buffer) {
+  const ffprobe = path.join(path.dirname(ffmpeg), path.basename(ffmpeg).replace(/ffmpeg/i, 'ffprobe'));
+  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-ff-'));
+  try {
+    const arquivo = path.join(pasta, 'in.mp4');
+    fs.writeFileSync(arquivo, buffer);
+    const saida = await new Promise((resolve, reject) => {
+      const p = spawn(path.isAbsolute(ffmpeg) ? ffprobe : 'ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,pix_fmt', '-of', 'json', arquivo], { windowsHide: true });
+      let out = '';
+      p.stdout.on('data', (d) => (out += d));
+      p.on('error', reject);
+      p.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error('ffprobe falhou'))));
+    });
+    const streams = JSON.parse(saida).streams || [];
+    const video = streams.find((s) => s.codec_type === 'video');
+    const audio = streams.find((s) => s.codec_type === 'audio');
+    return !!video && video.codec_name === 'h264' && (!video.pix_fmt || video.pix_fmt === 'yuv420p') && (!audio || audio.codec_name === 'aac');
+  } catch {
+    return false; // na dúvida, converte
+  } finally {
+    try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ }
+  }
+}
+
 async function paraMp4(buffer, extEntrada, { semAudio = false } = {}) {
   const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-ff-'));
   try {
@@ -195,8 +220,8 @@ async function baixarComYtdlp(url, tipo) {
   try {
     const formato = tipo === 'audio'
       ? 'ba[ext=m4a]/ba[ext=mp3]/ba'
-      // Prefere mp4 já com áudio (não precisa de ffmpeg); 720p no máximo.
-      : 'b[ext=mp4][height<=720]/bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[height<=720]/b';
+      // Prefere H.264 (avc1) + AAC em mp4, que todo celular toca; 720p no máximo.
+      : 'b[ext=mp4][vcodec^=avc1][height<=720]/bv*[vcodec^=avc1][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[height<=720]/b';
     await rodar(ytdlp, [
       '--no-playlist', '--playlist-items', '1', '--no-warnings', '--quiet',
       // "<=?" aceita quando o site não informa a duração (Instagram, X...).
@@ -277,7 +302,10 @@ async function montar(tipo, buffer, { mime = '', ext = '', nome = '', url = '', 
   }
 
   if (tipo === 'video') {
-    if (mime === 'video/mp4' || ext === 'mp4') return { video: buffer, mimetype: 'video/mp4', caption: legenda };
+    const ehMp4 = mime === 'video/mp4' || ext === 'mp4';
+    // Mesmo sendo .mp4, o vídeo pode estar em VP9/AV1/HEVC, que o WhatsApp do celular não abre
+    // ("tem algo errado com o vídeo"). Se não for H.264 + AAC, converte.
+    if (ehMp4 && (!ffmpeg || (await tocaNoWhatsapp(buffer)))) return { video: buffer, mimetype: 'video/mp4', caption: legenda };
     if (ffmpeg) return { video: await paraMp4(buffer, ext || (mime.split('/')[1] || 'bin')), mimetype: 'video/mp4', caption: legenda };
     return { document: buffer, mimetype: mime || 'video/mp4', fileName: nome || `video.${ext || 'mp4'}`, caption: legenda };
   }

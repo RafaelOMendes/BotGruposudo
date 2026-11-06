@@ -229,21 +229,33 @@ const SCHEMA_MENCAO = {
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
     regra_apagar_id: { type: 'string' },
     precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
+    imagem_gerada: {
+      type: 'object',
+      description: 'imagem para a IA de imagem criar e o bot mandar (fazer=false se não pediram para gerar imagem)',
+      properties: {
+        fazer: { type: 'boolean' },
+        prompt: { type: 'string', description: 'descrição da imagem, em inglês e detalhada (assunto, estilo, cenário, luz)' },
+        formato: { type: 'string', enum: ['quadrado', 'retrato', 'paisagem'] },
+      },
+      required: ['fazer', 'prompt', 'formato'],
+      additionalProperties: false,
+    },
     figurinha: {
       type: 'object',
       description: 'figurinha para o bot montar e mandar (fazer=false se não pediram figurinha)',
       properties: {
         fazer: { type: 'boolean' },
-        origem: { type: 'string', enum: ['imagem', 'web', 'meme', 'texto'], description: 'imagem = a imagem/figurinha anexada; web = imagem da internet (url); meme = template; texto = só texto' },
+        origem: { type: 'string', enum: ['imagem', 'web', 'meme', 'texto', 'gerada'], description: 'imagem = a imagem/figurinha anexada; web = imagem da internet (url); meme = template; texto = só texto; gerada = criada pela IA de imagem (prompt)' },
         url: { type: 'string', description: 'origem web: URL https direta da imagem' },
         meme_id: { type: 'string', description: 'origem meme: id do template' },
         texto_cima: { type: 'string' },
         texto_baixo: { type: 'string' },
         texto: { type: 'string', description: 'origem texto: o texto da figurinha' },
+        prompt: { type: 'string', description: 'origem gerada: descrição da imagem, em inglês e detalhada' },
         cor: { type: 'string', enum: ['branco', 'preto', 'amarelo', 'vermelho', 'azul', 'verde', 'rosa', 'roxo', 'laranja'] },
         recorte: { type: 'string', enum: ['inteira', 'quadrado'] },
       },
-      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'cor', 'recorte'],
+      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte'],
       additionalProperties: false,
     },
     anexos: {
@@ -264,13 +276,16 @@ const SCHEMA_MENCAO = {
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
-    'precisa_modelo_maior', 'figurinha',
+    'precisa_modelo_maior', 'figurinha', 'imagem_gerada',
   ],
   additionalProperties: false,
 };
 
 const SISTEMA_MENCAO = (grupo, temVideo) => `Você é o "Bot do Gabreu", um bot num grupo de amigos do WhatsApp chamado "${grupo}".
 Alguém te marcou (@) ou respondeu uma mensagem sua. Decida a ação.
+
+MARCAR PESSOAS: para marcar alguém, escreva "@" + o número dela exatamente como aparece (ex: "@45376446971961"),
+usando a lista "Pessoas do grupo" ou o "@número" que veio na mensagem. Se pedirem para marcar alguém, marque.
 
 NA DÚVIDA, PERGUNTE: se não der para saber o que a pessoa quer (qual vídeo, qual imagem, que texto
 vai na figurinha, de quem é a regra...), não chute: use "responder" com uma pergunta curta e objetiva
@@ -280,11 +295,14 @@ FIGURINHA: se pedirem para fazer/gerar/transformar em figurinha (sticker), preen
   - origem "imagem": usa a imagem ou figurinha que veio junto (na mensagem ou na mensagem respondida).
   - origem "web": ache uma imagem na internet (URL https direta) do que pediram.
   - origem "meme": um template da lista de memes, com texto_cima/texto_baixo.
+  - origem "gerada": {{GERADA}}
   - origem "texto": figurinha só com o texto (campo "texto"), escolha uma "cor".
   Se pedirem texto escrito na imagem, use texto_cima/texto_baixo. recorte "quadrado" só se pedirem
   para cortar/centralizar; senão "inteira". Pedido de figurinha sem imagem e sem dizer o que é: pergunte.
   O "texto" da resposta vira a legenda curta do serviço (ex: "figurinha do Nicolas feita"). Se não for
   figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira").
+GERAR IMAGEM: {{GERAR}}
+
 Templates de meme (id | nome):
 {{CATALOGO}}
 
@@ -363,9 +381,10 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '' }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '' }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   partes.push(`Regras ativas neste grupo (id | descrição):\n${regras || '(nenhuma)'}`);
+  if (pessoas) partes.push(`Pessoas do grupo (nome = como marcar):\n${pessoas}`);
   if (historico.length) {
     partes.push(leituraPedida
       ? `Pediram para você ler a conversa. Mensagens do grupo (mais antigas primeiro, com horário):\n${historico.join('\n')}`
@@ -379,9 +398,9 @@ export async function interpretarMencao({ grupo, historico, autor, pedido, citad
   const conteudo = await conteudoCom(imagens, partes.join('\n\n'));
 
   // 1ª tentativa no modelo leve (Haiku). Se ele disser que é complexo demais, refaz no Sonnet.
-  let v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, tarefa: 'mencao' });
+  let v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa: 'mencao' });
   if (v.precisa_modelo_maior) {
-    v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, tarefa: 'complexo' });
+    v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa: 'complexo' });
     v.usouModeloMaior = true;
   }
   return v;
@@ -394,11 +413,22 @@ texto longo e elaborado, comparar muitas fontes a fundo) e você não conseguir 
 precisa_modelo_maior = true e deixe o resto vazio: um modelo maior vai refazer. Na dúvida, faça você mesmo.`;
 const ESCALAR_FORTE = 'MODELO: você é o modelo mais forte do bot; faça o pedido completo. precisa_modelo_maior = false.';
 
-async function perguntarMencao({ grupo, temVideo, conteudo, catalogo, tarefa }) {
+async function perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa }) {
   const r = await perguntar({
     sistema: SISTEMA_MENCAO(grupo, temVideo)
       .replace('{{ESCALAR}}', tarefa === 'complexo' ? ESCALAR_FORTE : ESCALAR_LEVE)
       .replace('{{CATALOGO}}', catalogo || '(indisponível: não use origem meme)')
+      .replace('{{GERADA}}', temGerador
+        ? 'a IA de imagem cria a figurinha do zero a partir de "prompt" (em inglês, detalhado; para figurinha peça fundo simples/branco e o personagem centralizado). Use quando pedirem figurinha de algo que precisa ser desenhado/criado.'
+        : 'indisponível (o gerador de imagem está desligado); use web, meme ou texto.')
+      .replace('{{GERAR}}', temGerador
+        ? `se pedirem para gerar/criar/desenhar uma imagem (não buscar uma que já existe), preencha
+"imagem_gerada" com fazer = true, um "prompt" em inglês bem descritivo (assunto, estilo, cenário, luz,
+e qualquer texto que deva aparecer entre aspas) e o formato. A IA de imagem roda no PC e leva uns segundos.
+O "texto" vira a legenda. Pedido vago ("gera uma imagem"): pergunte do quê. Se não for gerar: fazer = false,
+prompt = "", formato = "quadrado". Não gere imagem de pessoas reais identificáveis em situação constrangedora,
+nem nudez ou violência explícita.`
+        : 'indisponível no momento (o gerador de imagem está desligado): diga isso se pedirem e ofereça buscar uma imagem na web. imagem_gerada.fazer = false.')
       .replace('{{VIDEO}}', temVideo
       ? `o conteúdo TEM que ser baixado e mandado como arquivo, nunca só o link. Ache a URL da
        postagem/vídeo específico (pesquise até achar o post certo) e coloque em "anexos" com tipo

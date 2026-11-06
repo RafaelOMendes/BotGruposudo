@@ -31,6 +31,7 @@ import makeWASocket, {
 import { avaliarNonsense, configurarModelos, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
+import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { baixarImagemDaWeb, ehSiteDeVideo, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -61,6 +62,13 @@ const CONFIG = {
   },
   // Caminho do Claude Code CLI (já logado). Padrão: `claude` no PATH.
   claude: process.env.CLAUDE_CLI_PATH || local.claude || 'claude',
+  // Geração de imagem local (ComfyUI + Z-Image Turbo na placa de vídeo).
+  gerador: {
+    ativo: local.gerador?.ativo ?? true,
+    pasta: local.gerador?.pasta || 'D:/IA/ComfyUI_windows_portable',
+    porta: local.gerador?.porta ?? 8188,
+    liberarVramMin: local.gerador?.liberarVramMin ?? 5,
+  },
   // Link de rede social (TikTok, Instagram, X, YouTube...) no grupo → o bot baixa e manda o vídeo.
   links: {
     ativo: local.links?.ativo ?? true,
@@ -165,6 +173,8 @@ const respostas = {
 const ia = await iniciarIA(CONFIG.claude);
 const modelos = configurarModelos(local.modelos);
 const regras = new Regras(DIR); // regras criadas pelo grupo (regras.json)
+const geradorOk = CONFIG.gerador.ativo && configurarGerador({ ...CONFIG.gerador, log: (msg) => log(msg) });
+process.on('exit', desligarGerador);
 const downloads = await iniciarDownloads(
   process.env.YTDLP_PATH || local.ytdlp || 'yt-dlp',
   process.env.FFMPEG_PATH || local.ffmpeg || 'ffmpeg',
@@ -278,6 +288,7 @@ async function iniciar() {
       const ids = [sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => '…' + jidNormalizedUser(j).split('@')[0].slice(-4) + '@' + j.split('@')[1]);
       log(`Downloads: yt-dlp ${downloads.ytdlp ? 'ok' : 'não encontrado (vídeos de sites viram link)'}, ffmpeg ${downloads.ffmpeg ? 'ok' : 'não encontrado (GIF vira figurinha)'}, cookies ${downloads.cookies ? 'ok' : 'sem (Instagram/Reddit privados podem falhar)'}.`);
       log(`Modelos: ${Object.entries(modelos).map(([t, m]) => `${t}=${m.modelo.replace('claude-', '')}/${m.esforco}`).join(', ')}.`);
+      log(`Gerador de imagem (ComfyUI): ${geradorOk ? `pronto em ${CONFIG.gerador.pasta}` : 'desligado/não instalado'}.`);
       log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
     }
     if (connection === 'close') {
@@ -419,7 +430,8 @@ async function iniciar() {
       try {
         const v = await interpretarMencao({
           grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
-          temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(),
+          temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
+          pessoas: pessoasParaPrompt(jid),
         });
         resposta = v.texto;
         if (v.usouModeloMaior) log(`Pedido de ${autor} era complexo: refeito no ${modelos.complexo.modelo}.`);
@@ -441,7 +453,24 @@ async function iniciar() {
           else resposta = `Não achei a regra "${v.regra_apagar_id}".`;
         }
 
-        // Figurinha pedida (de imagem mandada, da web, de meme ou só texto).
+        // Imagem gerada pela IA local (ComfyUI).
+        if (v.acao === 'responder' && v.imagem_gerada?.fazer && v.imagem_gerada.prompt) {
+          if (!geradorOk || !temGerador()) resposta = 'O gerador de imagem tá desligado agora.';
+          else {
+            try {
+              await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+              const png = await gerarImagem(v.imagem_gerada.prompt, { formato: v.imagem_gerada.formato });
+              anexos.push({ url: '', gerada: png });
+              servico = 'Imagem gerada';
+              log(`Imagem gerada para ${autor}: "${v.imagem_gerada.prompt.slice(0, 80)}"`);
+            } catch (e) {
+              log(`Não deu para gerar a imagem (${e.message}).`);
+              resposta = `Não consegui gerar a imagem: ${e.message}.`;
+            }
+          }
+        }
+
+        // Figurinha pedida (de imagem mandada, da web, de meme, só texto ou gerada pela IA).
         if (v.acao === 'responder' && v.figurinha?.fazer) {
           try {
             figurinhaPronta = await montarFigurinha(v.figurinha, imagens);
@@ -457,6 +486,7 @@ async function iniciar() {
         const prontos = [];
         const falhas = [];
         for (const a of anexos) {
+          if (a.gerada) { prontos.push({ image: a.gerada, caption: '' }); continue; }
           try {
             prontos.push(await prepararAnexo(a, ''));
             log(`Baixei ${a.tipo}: ${a.url}`);
@@ -480,9 +510,14 @@ async function iniciar() {
       if (!resposta && !anexos.length && !figurinhaPronta) return;
       if (servico) resposta = marcaServico(servico, resposta);
 
+      // "@123..." no texto só vira marcação de verdade se a mensagem disser quem está sendo marcado.
+      const mentions = mencoesDoTexto(resposta, meta);
+
       // Se o primeiro anexo aceita legenda, o texto vai nele; senão vai antes, numa mensagem própria.
-      if (anexos.length && 'caption' in anexos[0] && resposta && resposta.length <= 1000) anexos[0].caption = resposta;
-      else if (resposta) guardarEnviada(await sock.sendMessage(jid, { text: resposta }, { quoted: m }));
+      if (anexos.length && 'caption' in anexos[0] && resposta && resposta.length <= 1000) {
+        anexos[0].caption = resposta;
+        if (mentions.length) anexos[0].mentions = mentions;
+      } else if (resposta) guardarEnviada(await sock.sendMessage(jid, { text: resposta, mentions }, { quoted: m }));
       for (const [i, anexo] of anexos.entries()) {
         guardarEnviada(await sock.sendMessage(jid, anexo, i === 0 ? { quoted: m } : {}));
       }
@@ -491,6 +526,33 @@ async function iniciar() {
       log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}${figurinhaPronta ? ' + figurinha' : ''}`);
     };
     filaClaude = filaClaude.then(tarefa).catch((e) => log('Erro ao responder marcação:', e.stack || e));
+  }
+
+  // ---------- marcar pessoas ----------
+  // Nomes vistos no grupo (nome de perfil), para o Claude saber como marcar cada um.
+  const conhecidos = new Map(); // grupo -> Map(id -> nome)
+  function lembrarPessoa(jid, m) {
+    if (m.key.fromMe || !m.pushName) return;
+    const mapa = conhecidos.get(jid) || new Map();
+    for (const id of [m.key.participant, m.key.participantAlt].filter(Boolean)) mapa.set(digitos(jidNormalizedUser(id)), m.pushName);
+    conhecidos.set(jid, mapa);
+  }
+  function pessoasParaPrompt(jid) {
+    return [...(conhecidos.get(jid) || new Map())].map(([id, nome]) => `${nome} = @${id}`).join('\n');
+  }
+
+  /** Acha os "@número" do texto que são participantes do grupo e devolve os JIDs para marcar. */
+  function mencoesDoTexto(texto, meta) {
+    const numeros = [...new Set((String(texto || '').match(/@(\d{6,})/g) || []).map((t) => t.slice(1)))];
+    if (!numeros.length) return [];
+    const participantes = meta?.participants || [];
+    const jids = [];
+    for (const n of numeros) {
+      const p = participantes.find((x) =>
+        [x.id, x.lid, x.phoneNumber, x.jid].filter(Boolean).some((j) => digitos(jidNormalizedUser(j)) === n));
+      if (p) jids.push(p.id);
+    }
+    return jids;
   }
 
   // Serviço (baixar, fazer figurinha, criar regra...) leva uma marca no topo; resposta comum não.
@@ -510,6 +572,11 @@ async function iniciar() {
       return figurinhaDeImagem(await baixarImagemDaWeb(f.url), { ...textos, recorte: f.recorte });
     }
     if (f.origem === 'meme') return figurinhaDeMeme({ id: f.meme_id, ...textos });
+    if (f.origem === 'gerada') {
+      if (!geradorOk || !temGerador()) throw new Error('o gerador de imagem está desligado');
+      if (!f.prompt) throw new Error('faltou descrever a figurinha');
+      return figurinhaDeImagem(await gerarImagem(f.prompt, { formato: 'quadrado' }), { ...textos, recorte: 'inteira' });
+    }
     return figurinhaDeTexto(f.texto || [textos.cima, textos.baixo].filter(Boolean).join(' '), { cor: f.cor });
   }
 
@@ -635,6 +702,7 @@ async function iniciar() {
         const jid = m.key.remoteJid;
         if (!isJidGroup(jid)) continue;
         registrar(jid, m.key.fromMe ? 'Bot' : m.pushName || digitos(m.key.participant || ''), resumo(conteudo(m)));
+        lembrarPessoa(jid, m);
         if (m.key.fromMe || jaRespondidas.has(m.key.id)) continue;
 
         const idade = Date.now() / 1000 - Number(m.messageTimestamp || 0);
