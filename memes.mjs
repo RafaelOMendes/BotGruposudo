@@ -81,7 +81,18 @@ export async function figurinhaDeMeme({ id, cima = '', baixo = '' }) {
   if (!r.ok) throw new Error(`não baixou o template (${r.status})`);
   const original = Buffer.from(await r.arrayBuffer());
 
-  const base = await sharp(original).resize(512, 512, { fit: 'inside' }).png().toBuffer();
+  return figurinhaDeImagem(original, { cima, baixo, recorte: 'inteira' });
+}
+
+/**
+ * Figurinha a partir de uma imagem qualquer (mandada no grupo, achada na web...), com texto
+ * opcional em cima/embaixo. recorte "quadrado" corta o centro; "inteira" mantém a imagem toda.
+ */
+export async function figurinhaDeImagem(buffer, { cima = '', baixo = '', recorte = 'inteira' } = {}) {
+  const base = await sharp(buffer, { animated: false })
+    .resize(512, 512, recorte === 'quadrado' ? { fit: 'cover', position: 'centre' } : { fit: 'inside' })
+    .png()
+    .toBuffer();
   const { width: w, height: h } = await sharp(base).metadata();
   const margem = Math.round(h * 0.03);
   const svg = Buffer.from(
@@ -95,4 +106,50 @@ export async function figurinhaDeMeme({ id, cima = '', baixo = '' }) {
     .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .webp({ quality: 90 })
     .toBuffer();
+}
+
+const CORES = {
+  branco: ['#ffffff', '#000000'], preto: ['#111111', '#ffffff'], amarelo: ['#ffd500', '#000000'],
+  vermelho: ['#ff2d2d', '#ffffff'], azul: ['#2d7bff', '#ffffff'], verde: ['#22c55e', '#000000'],
+  rosa: ['#ff5fb3', '#ffffff'], roxo: ['#9b5cff', '#ffffff'], laranja: ['#ff8a00', '#000000'],
+};
+
+/** Figurinha só de texto: letras grandes com contorno, fundo transparente. */
+export async function figurinhaDeTexto(texto, { cor = 'branco' } = {}) {
+  const [preenchimento, contorno] = CORES[cor] || CORES.branco;
+  const palavras = String(texto || '').trim().split(/\s+/).filter(Boolean);
+  if (!palavras.length) throw new Error('sem texto para a figurinha');
+  // Acha a maior fonte em que o texto cabe em até 5 linhas dentro de 480×480.
+  let escolha = null;
+  for (let fonte = 120; fonte >= 28; fonte -= 4) {
+    const porLinha = Math.max(3, Math.floor(480 / (fonte * 0.6)));
+    const linhas = [];
+    let atual = '';
+    for (const p of palavras) {
+      const teste = atual ? `${atual} ${p}` : p;
+      if (teste.length <= porLinha) atual = teste;
+      else { if (atual) linhas.push(atual); atual = p; }
+    }
+    if (atual) linhas.push(atual);
+    if (linhas.length <= 5 && linhas.every((l) => l.length <= porLinha) && linhas.length * fonte * 1.15 <= 480) {
+      escolha = { fonte, linhas };
+      break;
+    }
+  }
+  escolha ||= { fonte: 28, linhas: [palavras.join(' ').slice(0, 80)] };
+  const { fonte, linhas } = escolha;
+  const altura = fonte * 1.15;
+  const y0 = 256 - (altura * (linhas.length - 1)) / 2 + fonte * 0.35;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">` +
+    linhas
+      .map(
+        (l, i) =>
+          `<text x="256" y="${y0 + i * altura}" font-size="${fonte}" text-anchor="middle"` +
+          ` font-family="Impact, 'Arial Black', Arial, sans-serif" font-weight="bold" fill="${preenchimento}"` +
+          ` stroke="${contorno}" stroke-width="${Math.max(3, fonte / 9)}" paint-order="stroke">${escapar(l)}</text>`
+      )
+      .join('') +
+    '</svg>';
+  return sharp(Buffer.from(svg)).webp({ quality: 90 }).toBuffer();
 }

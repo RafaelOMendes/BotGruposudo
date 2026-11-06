@@ -29,9 +29,9 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from 'baileys';
 import { avaliarNonsense, configurarModelos, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
-import { catalogoParaPrompt, figurinhaDeMeme } from './memes.mjs';
+import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
-import { ehSiteDeVideo, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
+import { baixarImagemDaWeb, ehSiteDeVideo, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -357,6 +357,8 @@ async function iniciar() {
     const ctx = contextoDa(conteudo(m));
     const eu = meusIds();
     if (ctx?.mentionedJid?.some((j) => eu.includes(jidNormalizedUser(j)))) return true;
+    // Respondeu (função "responder" do WhatsApp) uma mensagem do bot: conta como falar com ele.
+    if (ctx?.stanzaId && ctx?.participant && eu.includes(jidNormalizedUser(ctx.participant))) return true;
     const texto = textoDa(m);
     return eu.some((id) => texto.includes('@' + digitos(id)));
   }
@@ -406,14 +408,18 @@ async function iniciar() {
     // Pessoas marcadas na mensagem (fora o bot): viram os IDs do remetente se a pessoa criar uma regra.
     const outrosMarcados = (ctx?.mentionedJid || []).map(jidNormalizedUser).filter((j) => !meusIds().includes(j));
 
+    const respondeuBot = !!(ctx?.participant && meusIds().includes(jidNormalizedUser(ctx.participant)));
+
     const tarefa = async () => {
       await sock.sendPresenceUpdate('composing', jid).catch(() => {});
       let resposta;
       let anexos = [];
+      let figurinhaPronta = null;
+      let servico = null; // quando o bot fez um serviço (não só respondeu), a mensagem leva uma marca
       try {
         const v = await interpretarMencao({
           grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
-          temVideo: temDownloaderDeVideo(),
+          temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(),
         });
         resposta = v.texto;
         if (v.usouModeloMaior) log(`Pedido de ${autor} era complexo: refeito no ${modelos.complexo.modelo}.`);
@@ -421,15 +427,30 @@ async function iniciar() {
         if (v.acao === 'criar_regra') {
           const remetente = { nome: v.regra_remetente || '', ids: v.regra_remetente ? outrosMarcados : [] };
           const r = regras.criar(jid, v, remetente, autor);
-          if (r.ok) log(`Regra ${r.regra.id} criada por ${autor}: ${r.regra.descricao}`);
-          else {
+          if (r.ok) {
+            log(`Regra ${r.regra.id} criada por ${autor}: ${r.regra.descricao}`);
+            servico = 'Regra criada';
+          } else {
             log(`Regra recusada (${r.erro}) pedida por ${autor}.`);
             resposta = `Não criei essa regra: ${r.erro}.`;
           }
         } else if (v.acao === 'apagar_regra') {
           const ok = regras.apagar(jid, v.regra_apagar_id);
           log(`Regra ${v.regra_apagar_id} ${ok ? 'apagada' : 'não encontrada'} (pedido de ${autor}).`);
-          if (!ok) resposta = `Não achei a regra "${v.regra_apagar_id}".`;
+          if (ok) servico = 'Regra apagada';
+          else resposta = `Não achei a regra "${v.regra_apagar_id}".`;
+        }
+
+        // Figurinha pedida (de imagem mandada, da web, de meme ou só texto).
+        if (v.acao === 'responder' && v.figurinha?.fazer) {
+          try {
+            figurinhaPronta = await montarFigurinha(v.figurinha, imagens);
+            servico = 'Figurinha';
+            log(`Figurinha (${v.figurinha.origem}) feita para ${autor}.`);
+          } catch (e) {
+            log(`Não deu para fazer a figurinha (${e.message}).`);
+            resposta = `Não consegui fazer a figurinha: ${e.message}.`;
+          }
         }
 
         // Baixa o que o Claude pediu para mandar (com as travas de segurança do web.mjs).
@@ -445,15 +466,19 @@ async function iniciar() {
           }
         }
         anexos = prontos;
+        if (anexos.length && !servico) servico = 'Download';
         if (falhas.length) resposta = `${resposta || ''}\n\nNão consegui baixar:\n${falhas.map((f) => '- ' + f).join('\n')}`.trim();
       } catch (e) {
         log('Erro ao perguntar ao claude:', e.message);
         resposta = 'Travei aqui, tenta de novo daqui a pouco.';
         anexos = [];
+        figurinhaPronta = null;
+        servico = null;
       } finally {
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
       }
-      if (!resposta && !anexos.length) return;
+      if (!resposta && !anexos.length && !figurinhaPronta) return;
+      if (servico) resposta = marcaServico(servico, resposta);
 
       // Se o primeiro anexo aceita legenda, o texto vai nele; senão vai antes, numa mensagem própria.
       if (anexos.length && 'caption' in anexos[0] && resposta && resposta.length <= 1000) anexos[0].caption = resposta;
@@ -461,10 +486,31 @@ async function iniciar() {
       for (const [i, anexo] of anexos.entries()) {
         guardarEnviada(await sock.sendMessage(jid, anexo, i === 0 ? { quoted: m } : {}));
       }
+      if (figurinhaPronta) guardarEnviada(await sock.sendMessage(jid, { sticker: figurinhaPronta }, { quoted: m }));
       registrar(jid, 'Bot', resposta || '[anexo]');
-      log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}`);
+      log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}${figurinhaPronta ? ' + figurinha' : ''}`);
     };
     filaClaude = filaClaude.then(tarefa).catch((e) => log('Erro ao responder marcação:', e.stack || e));
+  }
+
+  // Serviço (baixar, fazer figurinha, criar regra...) leva uma marca no topo; resposta comum não.
+  function marcaServico(nome, texto) {
+    const corpo = String(texto || '').trim();
+    return `🤖 *Serviço: ${nome}*${corpo ? `\n${corpo}` : ''}`;
+  }
+
+  async function montarFigurinha(f, imagens) {
+    const textos = { cima: f.texto_cima || '', baixo: f.texto_baixo || '' };
+    if (f.origem === 'imagem') {
+      if (!imagens.length) throw new Error('não veio imagem junto; manda a imagem (ou responde ela) pedindo a figurinha');
+      return figurinhaDeImagem(imagens[0], { ...textos, recorte: f.recorte });
+    }
+    if (f.origem === 'web') {
+      if (!f.url) throw new Error('não achei imagem para usar');
+      return figurinhaDeImagem(await baixarImagemDaWeb(f.url), { ...textos, recorte: f.recorte });
+    }
+    if (f.origem === 'meme') return figurinhaDeMeme({ id: f.meme_id, ...textos });
+    return figurinhaDeTexto(f.texto || [textos.cima, textos.baixo].filter(Boolean).join(' '), { cor: f.cor });
   }
 
   // ---------- link de rede social → baixa e manda ----------
@@ -491,7 +537,7 @@ async function iniciar() {
       for (const url of urls) {
         await sock.sendPresenceUpdate('recording', jid).catch(() => {});
         try {
-          const anexo = await prepararAnexo({ url, tipo: 'video', nome: '' }, '');
+          const anexo = await prepararAnexo({ url, tipo: 'video', nome: '' }, marcaServico('Download', new URL(url).hostname.replace(/^www\./, '')));
           guardarEnviada(await sock.sendMessage(jid, anexo, { quoted: m }));
           log(`Link de ${autor} baixado e enviado: ${url}`);
         } catch (e) {
