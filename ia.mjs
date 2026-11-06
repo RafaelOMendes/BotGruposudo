@@ -315,6 +315,8 @@ export async function interpretarMencao({ grupo, historico, autor, pedido, citad
 const SISTEMA_REGRA = (grupo) => `Você é o "Bot do Gabreu", num grupo de amigos do WhatsApp chamado "${grupo}".
 Uma regra criada pelo grupo foi disparada por uma mensagem. Siga a instrução da regra para responder
 essa mensagem. Responda só com o texto que vai ser enviado (curto, formatação do WhatsApp, nada de # nem tabelas).
+Não fale sobre o que o bot consegue ou não consegue fazer (baixar vídeo, pesquisar, mandar arquivo...):
+isso é com outra parte do bot. Se a mensagem pedir algo assim, só diga para marcarem o bot com @.
 A data e a hora atuais (horário de Brasília) vêm no começo da mensagem.
 
 Tom:

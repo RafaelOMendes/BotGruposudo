@@ -19,5 +19,9 @@
     "ativo": true,
     "intervaloSeg": 10,
     "historico": 20
+  },
+  "links": {
+    "ativo": true,
+    "intervaloSeg": 5
   }
 }

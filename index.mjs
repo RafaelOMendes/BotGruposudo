@@ -30,7 +30,7 @@ import makeWASocket, {
 import { avaliarNonsense, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { catalogoParaPrompt, figurinhaDeMeme } from './memes.mjs';
 import { Regras } from './regras.mjs';
-import { iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
+import { ehSiteDeVideo, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -60,6 +60,11 @@ const CONFIG = {
   },
   // Caminho do Claude Code CLI (já logado). Padrão: `claude` no PATH.
   claude: process.env.CLAUDE_CLI_PATH || local.claude || 'claude',
+  // Link de rede social (TikTok, Instagram, X, YouTube...) no grupo → o bot baixa e manda o vídeo.
+  links: {
+    ativo: local.links?.ativo ?? true,
+    intervaloSeg: local.links?.intervaloSeg ?? 5,
+  },
   mencao: {
     ativo: local.mencao?.ativo ?? true,
     // Intervalo mínimo entre respostas para a mesma pessoa.
@@ -136,7 +141,8 @@ const ia = await iniciarIA(CONFIG.claude);
 const regras = new Regras(DIR); // regras criadas pelo grupo (regras.json)
 const downloads = await iniciarDownloads(
   process.env.YTDLP_PATH || local.ytdlp || 'yt-dlp',
-  process.env.FFMPEG_PATH || local.ffmpeg || 'ffmpeg'
+  process.env.FFMPEG_PATH || local.ffmpeg || 'ffmpeg',
+  path.join(DIR, local.cookies || 'cookies.txt')
 );
 
 // Desembrulha mensagens temporárias / de visualização única.
@@ -244,7 +250,7 @@ async function iniciar() {
       for (const [tipo, r] of Object.entries(respostas)) if (!r.buffer) log(`Figurinha de resposta não encontrada em ${r.arquivo}; resposta a ${tipo} desligada.`);
       log(`Figurinhas de ${CONFIG.figurinha.remetente}: ${ia ? 'IA decide se é non-sense' : `claude CLI não encontrado, responde com chance ${CONFIG.figurinha.chanceSemIA}`}.`);
       const ids = [sock.user?.id, sock.user?.lid].filter(Boolean).map((j) => '…' + jidNormalizedUser(j).split('@')[0].slice(-4) + '@' + j.split('@')[1]);
-      log(`Downloads: yt-dlp ${downloads.ytdlp ? 'ok' : 'não encontrado (vídeos de sites viram link)'}, ffmpeg ${downloads.ffmpeg ? 'ok' : 'não encontrado (GIF vira figurinha)'}.`);
+      log(`Downloads: yt-dlp ${downloads.ytdlp ? 'ok' : 'não encontrado (vídeos de sites viram link)'}, ffmpeg ${downloads.ffmpeg ? 'ok' : 'não encontrado (GIF vira figurinha)'}, cookies ${downloads.cookies ? 'ok' : 'sem (Instagram/Reddit privados podem falhar)'}.`);
       log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
     }
     if (connection === 'close') {
@@ -433,6 +439,44 @@ async function iniciar() {
     filaClaude = filaClaude.then(tarefa).catch((e) => log('Erro ao responder marcação:', e.stack || e));
   }
 
+  // ---------- link de rede social → baixa e manda ----------
+  let filaDownloads = Promise.resolve(); // um download por vez
+  let ultimoLink = 0;
+
+  function linksDeRede(texto) {
+    const urls = (texto.match(/https?:\/\/[^\s<>"]+/gi) || [])
+      .map((u) => u.replace(/[).,!?]+$/, '').replace(/^http:/i, 'https:'))
+      .filter(ehSiteDeVideo);
+    return [...new Set(urls)].slice(0, 2);
+  }
+
+  function baixarLinks(m, jid) {
+    if (!CONFIG.links.ativo || !temDownloaderDeVideo()) return false;
+    const urls = linksDeRede(textoDa(m));
+    if (!urls.length) return false;
+    if (Date.now() - ultimoLink < CONFIG.links.intervaloSeg * 1000) return false;
+    ultimoLink = Date.now();
+    jaRespondidas.add(m.key.id);
+    const autor = m.pushName || digitos(m.key.participant || '');
+
+    filaDownloads = filaDownloads.then(async () => {
+      for (const url of urls) {
+        await sock.sendPresenceUpdate('recording', jid).catch(() => {});
+        try {
+          const anexo = await prepararAnexo({ url, tipo: 'video', nome: '' }, '');
+          guardarEnviada(await sock.sendMessage(jid, anexo, { quoted: m }));
+          log(`Link de ${autor} baixado e enviado: ${url}`);
+        } catch (e) {
+          log(`Não deu para baixar o link de ${autor} (${e.message}): ${url}`);
+          guardarEnviada(await sock.sendMessage(jid, { text: `Não consegui baixar esse link: ${e.message}` }, { quoted: m }));
+        } finally {
+          await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+        }
+      }
+    }).catch((e) => log('Erro ao baixar links:', e.stack || e));
+    return true;
+  }
+
   // ---------- regras criadas pelo grupo ----------
   function tipoDaMensagem(c) {
     if (c.stickerMessage) return 'figurinha';
@@ -518,6 +562,7 @@ async function iniciar() {
           continue;
         }
 
+        if (baixarLinks(m, jid)) continue;
         if (await aplicarRegras(m, jid, meta)) continue;
 
         if (normalizar(meta.subject) !== normalizar(CONFIG.grupo)) continue;

@@ -90,9 +90,10 @@ const extensao = (url) => (path.extname(new URL(url).pathname).slice(1) || '').t
 const nomeDoArquivo = (url, padrao) => decodeURIComponent(path.basename(new URL(url).pathname)) || padrao;
 
 // ---------- yt-dlp (opcional) ----------
-const SITES_VIDEO = /(^|\.)(youtube\.com|youtu\.be|tiktok\.com|instagram\.com|twitter\.com|x\.com|threads\.net|threads\.com|reddit\.com|redd\.it|facebook\.com|fb\.watch|vimeo\.com|twitch\.tv|kwai\.com|kw\.ai|dailymotion\.com|soundcloud\.com|pinterest\.com|pin\.it|bilibili\.com|streamable\.com|snapchat\.com|linkedin\.com|tumblr\.com|9gag\.com|imgur\.com|bsky\.app|spotify\.com)$/i;
+const SITES_VIDEO = /(^|\.)(youtube\.com|youtu\.be|tiktok\.com|instagram\.com|twitter\.com|x\.com|threads\.net|threads\.com|reddit\.com|redd\.it|facebook\.com|fb\.watch|vimeo\.com|twitch\.tv|kwai\.com|kw\.ai|dailymotion\.com|soundcloud\.com|pinterest\.com|pin\.it|bilibili\.com|streamable\.com|snapchat\.com|linkedin\.com|tumblr\.com|9gag\.com|imgur\.com|bsky\.app)$/i;
 let ytdlp = null;
 let ffmpeg = null;
+let cookies = null;
 
 // O bot pode ter sido iniciado por um processo com o PATH antigo (antes de instalar as
 // ferramentas). Então, se não achar no PATH, procura nas pastas onde o winget instala.
@@ -156,11 +157,13 @@ function rodar(cmd, args, cwd, timeoutMs) {
 }
 
 /** Procura o yt-dlp (e diz se dá para juntar áudio+vídeo, o que precisa do ffmpeg). */
-export async function iniciarDownloads(caminho = 'yt-dlp', caminhoFfmpeg = 'ffmpeg') {
+export async function iniciarDownloads(caminho = 'yt-dlp', caminhoFfmpeg = 'ffmpeg', arquivoCookies = '') {
+  // cookies.txt (formato Netscape) de uma conta logada: libera Instagram/Reddit/X que pedem login.
+  cookies = arquivoCookies && fs.existsSync(arquivoCookies) ? arquivoCookies : null;
   ffmpeg = await acharFerramenta(caminhoFfmpeg, 'ffmpeg', '-version');
   adicionarAoPath(procurarExecutavel('deno')); // o yt-dlp usa o deno no YouTube
   ytdlp = await acharFerramenta(caminho, 'yt-dlp', '--version');
-  return { ytdlp: !!ytdlp, ffmpeg: !!ffmpeg, caminhoYtdlp: ytdlp, caminhoFfmpeg: ffmpeg };
+  return { ytdlp: !!ytdlp, ffmpeg: !!ffmpeg, cookies: !!cookies, caminhoYtdlp: ytdlp, caminhoFfmpeg: ffmpeg };
 }
 
 /** Converte GIF/vídeo para MP4 (H.264 + AAC) que o WhatsApp toca. Precisa do ffmpeg. */
@@ -195,9 +198,11 @@ async function baixarComYtdlp(url, tipo) {
       // Prefere mp4 já com áudio (não precisa de ffmpeg); 720p no máximo.
       : 'b[ext=mp4][height<=720]/bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[height<=720]/b';
     await rodar(ytdlp, [
-      '--no-playlist', '--no-warnings', '--quiet',
-      '--match-filter', 'duration <= 900',
+      '--no-playlist', '--playlist-items', '1', '--no-warnings', '--quiet',
+      // "<=?" aceita quando o site não informa a duração (Instagram, X...).
+      '--match-filter', 'duration <=? 900',
       '--max-filesize', `${(tipo === 'audio' ? LIMITE.audio : LIMITE.video) / MB}M`,
+      ...(cookies ? ['--cookies', cookies] : []),
       '-f', formato, '-o', 'midia.%(ext)s', url,
     ], pasta, 5 * 60_000);
     const arquivo = fs.readdirSync(pasta).find((f) => f.startsWith('midia.') && !f.endsWith('.part'));
