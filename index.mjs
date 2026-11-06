@@ -30,6 +30,7 @@ import makeWASocket, {
 import { avaliarNonsense, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { catalogoParaPrompt, figurinhaDeMeme } from './memes.mjs';
 import { Regras } from './regras.mjs';
+import { baixarImagemDaWeb } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -370,11 +371,13 @@ async function iniciar() {
     const tarefa = async () => {
       await sock.sendPresenceUpdate('composing', jid).catch(() => {});
       let resposta;
+      let imagemUrl = '';
       try {
         const v = await interpretarMencao({
           grupo: meta.subject, historico: hist, autor, pedido, citada, imagens, regras: regras.resumo(jid),
         });
         resposta = v.texto;
+        if (v.acao === 'responder' && v.imagem_url) imagemUrl = v.imagem_url;
         if (v.acao === 'criar_regra') {
           const remetente = { nome: v.regra_remetente || '', ids: v.regra_remetente ? outrosMarcados : [] };
           const r = regras.criar(jid, v, remetente, autor);
@@ -394,8 +397,18 @@ async function iniciar() {
       } finally {
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
       }
-      if (!resposta) return;
-      const enviada = await sock.sendMessage(jid, { text: resposta }, { quoted: m });
+      if (!resposta && !imagemUrl) return;
+      let conteudoMsg = { text: resposta };
+      if (imagemUrl) {
+        try {
+          conteudoMsg = { image: await baixarImagemDaWeb(imagemUrl), caption: resposta };
+          log(`Imagem da web baixada: ${imagemUrl}`);
+        } catch (e) {
+          log(`Não deu para baixar a imagem (${e.message}): ${imagemUrl}`);
+          conteudoMsg = { text: `${resposta}\n\n${imagemUrl}`.trim() };
+        }
+      }
+      const enviada = await sock.sendMessage(jid, conteudoMsg, { quoted: m });
       guardarEnviada(enviada);
       registrar(jid, 'Bot', resposta);
       log(`Respondi ${autor}: "${resposta.slice(0, 80).replace(/\n/g, ' ')}"`);
