@@ -27,6 +27,7 @@ export async function iniciarIA(caminho = 'claude') {
 function executar(cmd, args, entrada, timeoutMs) {
   // Diretório vazio e descartável: nada de CLAUDE.md, projeto ou arquivos por perto.
   const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-'));
+  const limpar = () => { try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ } };
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { cwd: pasta, windowsHide: true });
     let out = '';
@@ -34,10 +35,10 @@ function executar(cmd, args, entrada, timeoutMs) {
     const timer = setTimeout(() => { p.kill(); reject(new Error(`claude demorou mais de ${timeoutMs / 1000}s`)); }, timeoutMs);
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
-    p.on('error', (e) => { clearTimeout(timer); reject(e); });
+    p.on('error', (e) => { clearTimeout(timer); limpar(); reject(e); });
     p.on('close', (code) => {
       clearTimeout(timer);
-      fs.rmSync(pasta, { recursive: true, force: true });
+      limpar();
       if (code === 0) resolve(out);
       else reject(new Error(`claude saiu com código ${code}: ${err.slice(0, 300)}`));
     });

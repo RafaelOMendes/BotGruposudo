@@ -182,7 +182,7 @@ async function paraMp4(buffer, extEntrada, { semAudio = false } = {}) {
     ], pasta, 3 * 60_000);
     return fs.readFileSync(path.join(pasta, 'saida.mp4'));
   } finally {
-    fs.rmSync(pasta, { recursive: true, force: true });
+    try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ }
   }
 }
 export const temDownloaderDeVideo = () => !!ytdlp;
@@ -211,7 +211,7 @@ async function baixarComYtdlp(url, tipo) {
     const ext = path.extname(arquivo).slice(1).toLowerCase();
     return { buffer, ext };
   } finally {
-    fs.rmSync(pasta, { recursive: true, force: true });
+    try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ }
   }
 }
 
@@ -248,7 +248,7 @@ async function paraMp3(buffer, extEntrada) {
     await rodar(ffmpeg, ['-y', '-i', entrada, '-vn', '-c:a', 'libmp3lame', '-b:a', '128k', 'saida.mp3'], pasta, 3 * 60_000);
     return fs.readFileSync(path.join(pasta, 'saida.mp3'));
   } finally {
-    fs.rmSync(pasta, { recursive: true, force: true });
+    try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ }
   }
 }
 

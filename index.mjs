@@ -11,6 +11,7 @@
 // iPhone faz quando não consegue descriptografar ("Aguardando mensagem") são atendidos via getMessage.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
@@ -76,12 +77,34 @@ const CONFIG = {
 
 // ---------- log ----------
 const LOG_FILE = path.join(DIR, 'bot.log');
+const LOG_MAX = 5 * 1024 * 1024; // passou de 5 MB → vira bot.log.1 (o antigo .1 é apagado)
 function log(...args) {
   const line = `[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ${args.join(' ')}`;
   console.log(line);
+  try {
+    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > LOG_MAX) fs.renameSync(LOG_FILE, LOG_FILE + '.1');
+  } catch { /* segue no mesmo arquivo */ }
   fs.appendFileSync(LOG_FILE, line + '\n');
 }
 const logger = pino({ level: 'silent' });
+
+// ---------- faxina: apaga pastas temporárias do bot que sobraram (ex: bot fechado no meio de um download) ----------
+function faxinaTemporarios() {
+  const tmp = os.tmpdir();
+  let apagadas = 0;
+  for (const nome of fs.readdirSync(tmp)) {
+    if (!nome.startsWith('bot-gabreu-')) continue;
+    const caminho = path.join(tmp, nome);
+    try {
+      if (Date.now() - fs.statSync(caminho).mtimeMs < 60 * 60 * 1000) continue; // deixa as recentes (podem estar em uso)
+      fs.rmSync(caminho, { recursive: true, force: true });
+      apagadas++;
+    } catch { /* em uso; tenta na próxima */ }
+  }
+  if (apagadas) log(`Faxina: ${apagadas} pasta(s) temporária(s) antiga(s) apagada(s).`);
+}
+faxinaTemporarios();
+setInterval(faxinaTemporarios, 6 * 60 * 60 * 1000).unref();
 
 // ---------- trava de instância única ----------
 const LOCK = path.join(DIR, '.bot.lock');
