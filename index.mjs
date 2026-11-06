@@ -29,7 +29,8 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from 'baileys';
 import { avaliarEntregas, avaliarNonsense, configurarModelos, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
-import { iniciarAvisos } from './entregas.mjs';
+import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
+import { vigiarLogin } from './classroom.mjs';
 import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
@@ -271,6 +272,8 @@ if (local.entregas?.ativo && ia) {
       return true;
     },
   });
+  // Login do Classroom expirou → abre o navegador sozinho para entrar de novo.
+  if (local.entregas.classroom?.clientId) vigiarLogin(local.entregas.classroom, { log });
 }
 
 // ---------- conexão ----------
@@ -464,7 +467,18 @@ async function iniciar() {
         guardarEnviada(await sock.sendMessage(jid, { text: marcaServico('Gerando imagem', 'Começou aqui, leva uns 1 a 2 minutos.') }, { quoted: m }));
       };
       try {
+        // Pergunta sobre trabalho/prova/prazo → consulta Moodle e Classroom e manda a lista junto.
+        let entregas = '';
+        if (local.entregas?.ativo && PERGUNTA_ENTREGA.test(`${pedido} ${citada}`)) {
+          try {
+            entregas = await listaParaPergunta(local.entregas, { log });
+            log(`Marcação sobre entregas: lista do Moodle/Classroom enviada ao Claude.`);
+          } catch (e) {
+            log(`Não deu para buscar as entregas (${e.message}).`);
+          }
+        }
         const v = await interpretarMencao({
+          entregas,
           grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
           temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
           pessoas: pessoasParaPrompt(jid),

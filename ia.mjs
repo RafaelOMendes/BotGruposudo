@@ -382,8 +382,19 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '' }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '' }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
+  if (entregas) {
+    partes.push(`ENTREGAS DA FACULDADE (Moodle e Google Classroom do Rafa, consultados agora; prazos no horário de Brasília):
+${entregas}
+
+Se a pergunta for sobre trabalhos, provas, atividades, entregas ou prazos, responda com base nesta lista:
+diga o nome, a disciplina, o dia (e a hora) e quanto vale (a nota vem em "vale X pontos" ou na descrição,
+como "PESO: 20 PONTOS"; se não houver, diga que não sabe a nota). Filtre pelo período que perguntaram
+(hoje, amanhã, esta semana, semana que vem...) usando a data de agora. Pule fóruns opcionais de dúvida
+ou de organização de grupos, a não ser que perguntem deles. Se não tiver nada no período, diga isso.
+Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o acesso.`);
+  }
   partes.push(`Regras ativas neste grupo (id | descrição):\n${regras || '(nenhuma)'}`);
   if (pessoas) partes.push(`Pessoas do grupo (nome = como marcar):\n${pessoas}`);
   if (historico.length) {

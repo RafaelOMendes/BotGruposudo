@@ -84,16 +84,42 @@ async function buscarIcs(url, fonte) {
 }
 
 /** Junta as atividades de todas as fontes configuradas. Fonte com erro não derruba as outras. */
-export async function buscarAtividades(cfg, log = console.log) {
+export async function buscarAtividades(cfg, log = console.log, { diasClassroom = 3 } = {}) {
   const fontes = [];
   if (cfg.moodle) fontes.push(['Moodle', () => buscarIcs(cfg.moodle, 'Moodle')]);
   for (const [i, c] of (cfg.calendarios || []).entries()) fontes.push([c.nome || `Calendário ${i + 1}`, () => buscarIcs(c.url, c.nome || 'Calendário')]);
-  if (cfg.classroom?.clientId && classroomConectado()) fontes.push(['Classroom', () => buscarClassroom(cfg.classroom)]);
+  if (cfg.classroom?.clientId && classroomConectado()) fontes.push(['Classroom', () => buscarClassroom(cfg.classroom, { dias: diasClassroom })]);
   const todas = [];
   for (const [nome, buscar] of fontes) {
     try { todas.push(...(await buscar())); } catch (e) { log(`Entregas: não deu para ler ${nome} (${e.message}).`); }
   }
   return todas;
+}
+
+// ---------- perguntas no grupo ("tem trabalho semana que vem?") ----------
+export const PERGUNTA_ENTREGA = /\b(trabalh\w*|entreg\w*|prazos?|provas?|atividades?|tarefas?|question[aá]rios?|avalia[cç][aã]o|avalia[cç][oõ]es|moodle|classroom|deadline|vence\w*|li[cç][aã]o|exerc[ií]cios?|semin[aá]rios?|relat[oó]rios?)\b/i;
+
+const cacheLista = { em: 0, texto: '' };
+const diaSemana = (d) => new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: '2-digit' }).format(d);
+
+/** Lista das entregas dos próximos `dias` dias, para o Claude responder perguntas. Cache de 10 min. */
+export async function listaParaPergunta(cfg, { dias = 21, log = console.log } = {}) {
+  if (Date.now() - cacheLista.em < 10 * 60e3) return cacheLista.texto;
+  const agora = new Date();
+  const fim = agora.getTime() + dias * 864e5;
+  const itens = (await buscarAtividades(cfg, log, { diasClassroom: dias }))
+    .filter((a) => a.prazo > agora && a.prazo.getTime() <= fim)
+    .sort((a, b) => a.prazo - b.prazo);
+  const texto = itens.length
+    ? itens.map((a) => [
+      `- ${diaSemana(a.prazo)} às ${horaDe(a.prazo)} | ${a.fonte} | ${a.disciplina || 'disciplina não informada'} | ${a.titulo}`,
+      a.pontos != null ? ` | vale ${a.pontos} pontos` : '',
+      a.descricao ? ` | descrição: ${a.descricao.replace(/\s+/g, ' ').slice(0, 220)}` : '',
+    ].join('')).join('\n')
+    : `(nenhuma entrega com prazo nos próximos ${dias} dias)`;
+  cacheLista.em = Date.now();
+  cacheLista.texto = texto;
+  return texto;
 }
 
 // ---------- quem entra em cada horário ----------

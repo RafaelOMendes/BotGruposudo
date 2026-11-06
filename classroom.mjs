@@ -27,8 +27,45 @@ async function tokenDeAcesso({ clientId, clientSecret }) {
     body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token, grant_type: 'refresh_token' }),
   });
   const j = await r.json();
-  if (!j.access_token) throw new Error(`Classroom recusou o token: ${j.error || r.status} ${j.error_description || ''}`.trim());
+  if (!j.access_token) {
+    const e = new Error(`Classroom recusou o token: ${j.error || r.status} ${j.error_description || ''}`.trim());
+    e.loginVencido = j.error === 'invalid_grant'; // login expirou ou foi revogado: precisa entrar de novo
+    throw e;
+  }
   return j.access_token;
+}
+
+/**
+ * Confere o login de tempos em tempos (e quando o bot liga). Se expirou, abre o navegador sozinho
+ * para entrar de novo; no máximo uma vez a cada `intervaloAbrirH` horas, para não ficar abrindo aba.
+ */
+export function vigiarLogin(cfg, { log = console.log, intervaloH = 1, intervaloAbrirH = 6 } = {}) {
+  let ultimaAbertura = 0;
+  let emAndamento = false;
+  const conferir = async () => {
+    if (emAndamento || !classroomConectado()) return;
+    try {
+      await tokenDeAcesso(cfg);
+    } catch (e) {
+      if (!e.loginVencido) { log(`Classroom: não deu para conferir o login (${e.message}).`); return; }
+      if (Date.now() - ultimaAbertura < intervaloAbrirH * 3600e3) return;
+      ultimaAbertura = Date.now();
+      emAndamento = true;
+      log('Classroom: o login expirou; abrindo o navegador para entrar de novo (espera até 2 h).');
+      try {
+        await login(cfg, { timeoutMs: 2 * 3600e3, log });
+        log('Classroom: login renovado.');
+      } catch (erro) {
+        log(`Classroom: login não foi renovado (${erro.message}); tento de novo em ${intervaloAbrirH} h.`);
+      } finally {
+        emAndamento = false;
+      }
+    }
+  };
+  setTimeout(conferir, 20_000);
+  const timer = setInterval(conferir, intervaloH * 3600e3);
+  timer.unref?.();
+  return conferir;
 }
 
 async function get(url, token) {
@@ -69,7 +106,7 @@ export async function buscarClassroom(cfg, { dias = 3 } = {}) {
 }
 
 /** Login uma vez: abre o navegador, recebe o código numa porta local e salva o token. */
-async function login({ clientId, clientSecret }) {
+export async function login({ clientId, clientSecret }, { timeoutMs = 10 * 60e3, log = console.log } = {}) {
   const servidor = http.createServer();
   await new Promise((ok) => servidor.listen(0, '127.0.0.1', ok));
   const redirect = `http://127.0.0.1:${servidor.address().port}`;
@@ -77,18 +114,20 @@ async function login({ clientId, clientSecret }) {
     client_id: clientId, redirect_uri: redirect, response_type: 'code', scope: ESCOPOS.join(' '),
     access_type: 'offline', prompt: 'consent',
   });
-  console.log('Abrindo o navegador para entrar no Google. Se não abrir, cole este link:\n' + url);
+  log('Abrindo o navegador para entrar no Google (Classroom). Se não abrir, cole este link:\n' + url);
+  // "start" com a URL entre aspas; o & da URL não pode ser interpretado pelo cmd.
   exec(`start "" "${url}"`);
+  let timer;
   const codigo = await new Promise((ok, falha) => {
+    timer = setTimeout(() => falha(new Error('ninguém fez o login a tempo')), timeoutMs);
     servidor.on('request', (req, res) => {
       const p = new URL(req.url, redirect).searchParams;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        .end(p.get('code') ? '<h2>Pronto! Pode fechar esta aba.</h2>' : `<h2>Não deu: ${p.get('error') || 'sem código'}</h2>`);
+        .end(p.get('code') ? '<h2>Pronto! Bot do Gruposudo conectado ao Classroom. Pode fechar esta aba.</h2>' : `<h2>Não deu: ${p.get('error') || 'sem código'}</h2>`);
       if (p.get('code')) ok(p.get('code'));
       else if (p.get('error')) falha(new Error(p.get('error')));
     });
-  });
-  servidor.close();
+  }).finally(() => { clearTimeout(timer); servidor.close(); });
   const r = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -97,7 +136,7 @@ async function login({ clientId, clientSecret }) {
   const j = await r.json();
   if (!j.refresh_token) throw new Error(`Google não devolveu o token: ${JSON.stringify(j)}`);
   fs.writeFileSync(TOKEN, JSON.stringify({ refresh_token: j.refresh_token }));
-  console.log('Classroom conectado. Token salvo em .classroom_token.json.');
+  log('Classroom conectado. Token salvo em .classroom_token.json.');
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url) && process.argv.includes('--login')) {
