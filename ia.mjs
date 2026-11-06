@@ -11,6 +11,33 @@ import path from 'node:path';
 import sharp from 'sharp';
 
 let comando = null;
+let ultimoModelo = '';
+/** Modelo(s) que responderam a última chamada (como o CLI informou). */
+export const modeloDaUltimaChamada = () => ultimoModelo;
+
+// Modelo e esforço por tarefa (para economizar o plano). Tudo no Haiku; o Sonnet só entra quando o
+// próprio Haiku diz que o pedido é complexo demais. Opus e acima são bloqueados.
+// Sobrescreva com "modelos" no config.json.
+const HAIKU = 'claude-haiku-5-5';
+const MODELOS = {
+  figurinha: { modelo: HAIKU, esforco: 'low' },                   // é non-sense? qual meme?
+  meme: { modelo: HAIKU, esforco: 'low' },                        // meme de regra
+  regra: { modelo: HAIKU, esforco: 'low' },                       // resposta de regra com ação "ia"
+  mencao: { modelo: HAIKU, esforco: 'medium' },                   // marcação (conversa, pesquisa, regras)
+  complexo: { modelo: 'claude-sonnet-5-5', esforco: 'medium' },   // só quando o Haiku pede ajuda
+};
+const PROIBIDO = /opus|fable|mythos/i;
+
+/** Troca modelos/esforço a partir do config (ex: { mencao: { esforco: "low" } }). Recusa Opus e acima. */
+export function configurarModelos(personalizados = {}) {
+  for (const [tarefa, cfg] of Object.entries(personalizados || {})) {
+    if (!MODELOS[tarefa]) continue;
+    const novo = { ...MODELOS[tarefa], ...cfg };
+    if (PROIBIDO.test(novo.modelo || '')) novo.modelo = tarefa === 'complexo' ? 'claude-sonnet-5-5' : HAIKU;
+    MODELOS[tarefa] = novo;
+  }
+  return MODELOS;
+}
 
 /** Verifica se o `claude` está instalado. Retorna true/false. */
 export async function iniciarIA(caminho = 'claude') {
@@ -65,7 +92,8 @@ export async function blocoImagem(buffer) {
  * @param {string[]} [o.ferramentas] ferramentas liberadas (ex: ['WebSearch'])
  * @param {string} [o.esforco] low | medium | high
  */
-async function perguntar({ conteudo, sistema, schema, ferramentas = [], esforco, timeoutMs = 180_000 }) {
+async function perguntar({ conteudo, sistema, schema, ferramentas = [], tarefa, timeoutMs = 180_000 }) {
+  const { modelo, esforco } = MODELOS[tarefa] || {};
   if (!comando) throw new Error('claude CLI não encontrado');
   const args = [
     '-p',
@@ -81,6 +109,7 @@ async function perguntar({ conteudo, sistema, schema, ferramentas = [], esforco,
   ];
   if (ferramentas.length) args.push('--allowedTools', ferramentas.join(','));
   if (schema) args.push('--json-schema', JSON.stringify(schema));
+  if (modelo) args.push('--model', modelo);
   if (esforco) args.push('--effort', esforco);
 
   const entrada = JSON.stringify({ type: 'user', message: { role: 'user', content: conteudo } }) + '\n';
@@ -89,6 +118,7 @@ async function perguntar({ conteudo, sistema, schema, ferramentas = [], esforco,
   const linhas = saida.trim().split('\n');
   const final = linhas.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((e) => e?.type === 'result').pop();
   if (!final) throw new Error('claude não devolveu resultado');
+  ultimoModelo = Object.keys(final.modelUsage || {}).join(', ') || modelo || '?';
   if (final.is_error) throw new Error(`claude devolveu erro: ${final.subtype} ${final.result || ''}`.trim());
   return final;
 }
@@ -173,7 +203,7 @@ export async function avaliarNonsense(buffer, { autor, tipo, catalogo }) {
     sistema: SISTEMA_NONSENSE(catalogo),
     conteudo: await conteudoCom([buffer], `${autor} mandou essa ${tipo} no grupo. É non-sense? Se for, qual a resposta?`),
     schema: SCHEMA_NONSENSE,
-    esforco: 'low',
+    tarefa: 'figurinha',
     timeoutMs: 120_000,
   });
   const v = r.structured_output;
@@ -198,6 +228,7 @@ const SCHEMA_MENCAO = {
     regra_acao_tipo: { type: 'string', enum: TIPOS_ACAO },
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
     regra_apagar_id: { type: 'string' },
+    precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
     anexos: {
       type: 'array',
       description: 'conteúdos para baixar e mandar no grupo (máx. 3); [] se não houver',
@@ -216,6 +247,7 @@ const SCHEMA_MENCAO = {
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
+    'precisa_modelo_maior',
   ],
   additionalProperties: false,
 };
@@ -223,6 +255,7 @@ const SCHEMA_MENCAO = {
 const SISTEMA_MENCAO = (grupo, temVideo) => `Você é o "Bot do Gabreu", um bot num grupo de amigos do WhatsApp chamado "${grupo}".
 Alguém te marcou (@). Decida a ação:
 
+{{ESCALAR}}
 - "responder": conversa normal. Responda o que pediram, no mesmo tom de quem falou.
 
 PEDIDOS DE VERDADE VÊM PRIMEIRO. Quando pedirem para pesquisar, procurar, buscar, achar, mandar ou
@@ -300,9 +333,29 @@ export async function interpretarMencao({ grupo, historico, autor, pedido, citad
   if (citada) partes.push(`A mensagem de ${autor} responde a esta mensagem:\n${citada}`);
   partes.push(`${autor} te marcou e disse:\n${pedido || '(só te marcou, sem texto)'}`);
   if (imagens.length) partes.push(`(${imagens.length} imagem(ns) anexada(s) acima.)`);
+  const conteudo = await conteudoCom(imagens, partes.join('\n\n'));
 
+  // 1ª tentativa no modelo leve (Haiku). Se ele disser que é complexo demais, refaz no Sonnet.
+  let v = await perguntarMencao({ grupo, temVideo, conteudo, tarefa: 'mencao' });
+  if (v.precisa_modelo_maior) {
+    v = await perguntarMencao({ grupo, temVideo, conteudo, tarefa: 'complexo' });
+    v.usouModeloMaior = true;
+  }
+  return v;
+}
+
+const ESCALAR_LEVE = `MODELO: você é o modelo leve do bot. Quase tudo você resolve: conversa, perguntas, zoeira,
+pesquisas comuns na web, achar/mandar vídeo, imagem ou link, criar/apagar regras, resumir conversa.
+Só se o pedido for COMPLEXO de verdade (programa ou código grande, conta/análise de várias etapas,
+texto longo e elaborado, comparar muitas fontes a fundo) e você não conseguir fazer bem, marque
+precisa_modelo_maior = true e deixe o resto vazio: um modelo maior vai refazer. Na dúvida, faça você mesmo.`;
+const ESCALAR_FORTE = 'MODELO: você é o modelo mais forte do bot; faça o pedido completo. precisa_modelo_maior = false.';
+
+async function perguntarMencao({ grupo, temVideo, conteudo, tarefa }) {
   const r = await perguntar({
-    sistema: SISTEMA_MENCAO(grupo, temVideo).replace('{{VIDEO}}', temVideo
+    sistema: SISTEMA_MENCAO(grupo, temVideo)
+      .replace('{{ESCALAR}}', tarefa === 'complexo' ? ESCALAR_FORTE : ESCALAR_LEVE)
+      .replace('{{VIDEO}}', temVideo
       ? `o conteúdo TEM que ser baixado e mandado como arquivo, nunca só o link. Ache a URL da
        postagem/vídeo específico (pesquise até achar o post certo) e coloque em "anexos" com tipo
        "video" (ou "audio" se pediram só o som/música): o bot baixa com o yt-dlp (até 15 min e ~45 MB).
@@ -310,8 +363,9 @@ export async function interpretarMencao({ grupo, historico, autor, pedido, citad
        cdninstagram.com) e use tipo "imagem". Se mandarem um link dessas redes no grupo e pedirem o
        conteúdo, use esse link. O link pode ir no texto também, mas o arquivo vai em "anexos".`
       : 'o bot ainda NÃO consegue baixar desses sites; mande o link no texto em vez de anexo.'),
-    conteudo: await conteudoCom(imagens, partes.join('\n\n')),
+    conteudo,
     schema: SCHEMA_MENCAO,
+    tarefa,
     ferramentas: ['WebSearch', 'WebFetch'],
   });
   const v = r.structured_output;
@@ -344,7 +398,7 @@ export async function respostaDeRegra({ grupo, historico, autor, mensagem, instr
     `Instrução da regra: ${instrucao}`,
     `Mensagem de ${autor} que disparou a regra:\n${mensagem || '(sem texto)'}`,
   ].filter(Boolean).join('\n\n');
-  const r = await perguntar({ sistema: SISTEMA_REGRA(grupo), conteudo: await conteudoCom(imagens, texto) });
+  const r = await perguntar({ sistema: SISTEMA_REGRA(grupo), conteudo: await conteudoCom(imagens, texto), tarefa: 'regra' });
   const saida = String(r.result || '').trim();
   if (!saida) throw new Error('claude devolveu resposta vazia');
   return saida;
@@ -372,7 +426,7 @@ ${catalogo}`;
     instrucao ? `Instrução: ${instrucao}` : '',
     `Mensagem de ${autor} para zoar:\n${mensagem || '(sem texto; veja a imagem)'}`,
   ].filter(Boolean).join('\n\n');
-  const r = await perguntar({ sistema, conteudo: await conteudoCom(imagens, texto), schema: SCHEMA_MEME, esforco: 'low' });
+  const r = await perguntar({ sistema, conteudo: await conteudoCom(imagens, texto), schema: SCHEMA_MEME, tarefa: 'meme' });
   const v = r.structured_output;
   if (!v?.meme_id) throw new Error('claude não escolheu meme');
   return v;

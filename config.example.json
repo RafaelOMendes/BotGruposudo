@@ -24,5 +24,15 @@
   "links": {
     "ativo": true,
     "intervaloSeg": 5
+  },
+  "modelos": {
+    "mencao": {
+      "modelo": "claude-haiku-5-5",
+      "esforco": "medium"
+    },
+    "complexo": {
+      "modelo": "claude-sonnet-5-5",
+      "esforco": "medium"
+    }
   }
 }

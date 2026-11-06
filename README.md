@@ -67,6 +67,7 @@ Copie `config.example.json` para `config.json` (fica fora do git) e ajuste:
 | `links.ativo` / `links.intervaloSeg` | Liga/desliga o download automático de links de redes sociais (padrão: ligado, 5 s entre links) |
 | `cookies` | Arquivo `cookies.txt` (formato Netscape) de uma conta logada, para o yt-dlp baixar posts que exigem login (padrão: `cookies.txt` na pasta do bot; fica fora do git). Dá para exportar com a extensão "Get cookies.txt LOCALLY" no navegador. Use uma conta secundária. |
 | `ytdlp` / `ffmpeg` | Caminhos do yt-dlp e do ffmpeg (padrão: no PATH; ou variáveis `YTDLP_PATH` / `FFMPEG_PATH`) |
+| `modelos` | Modelo/esforço por tarefa. Padrão: tudo no **Claude Haiku 5.5**; o **Claude Sonnet 5.5** só entra quando o Haiku marca que o pedido é complexo demais. Opus e acima são bloqueados. Ex.: `{"mencao": {"esforco": "low"}}` |
 | `claude` | Caminho do Claude Code CLI (padrão: `claude` no PATH; ou variável `CLAUDE_CLI_PATH`) |
 
 Para criar uma figurinha a partir de qualquer imagem:
