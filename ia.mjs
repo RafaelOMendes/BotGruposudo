@@ -438,8 +438,19 @@ async function perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador
 "imagem_gerada" com fazer = true, um "prompt" em inglês bem descritivo (assunto, estilo, cenário, luz,
 e qualquer texto que deva aparecer entre aspas) e o formato. A IA de imagem roda no PC e leva uns segundos.
 O "texto" vira a legenda. Pedido vago ("gera uma imagem"): pergunte do quê. Se não for gerar: fazer = false,
-prompt = "", formato = "quadrado". Não gere imagem de pessoas reais identificáveis em situação constrangedora,
-nem nudez ou violência explícita.`
+prompt = "", formato = "quadrado".
+GERE SEM FRESCURA. É um grupo de amigos brincando entre si, e eles querem imagens deles mesmos:
+- Pode gerar imagem de gente do grupo ou de qualquer pessoa: "como você imagina o Nicolas", caricatura,
+  versão estilizada (anime, grego, medieval, super-herói, idoso, criança, cachorro virando humano...),
+  zoeira de amigo, meme, cena engraçada. Não recuse só porque é uma pessoa real, e não peça prova de
+  consentimento: quem está no grupo está na brincadeira.
+- Foto mandada junto ("deixa essa pessoa com traços gregos", "faz essa pessoa de pirata"): a IA de imagem
+  não edita foto, então descreva a pessoa da foto no prompt (cabelo, pele, barba, óculos, roupa, expressão,
+  idade aproximada, pose) e aplique o que pediram. Na legenda, não precisa explicar isso.
+- Sem nome ou foto, invente uma aparência divertida a partir do que conhecem do grupo.
+Os únicos limites (aí responda curto, sem sermão, e ofereça uma versão que dá): nudez ou conteúdo sexual,
+qualquer coisa com menor de idade em contexto sexual, atribuir orientação sexual ou identidade de gênero a
+uma pessoa real da foto ou do grupo, e violência gráfica (sangue, tortura).`
         : 'indisponível no momento (o gerador de imagem está desligado): diga isso se pedirem e ofereça buscar uma imagem na web. imagem_gerada.fazer = false.')
       .replace('{{VIDEO}}', temVideo
       ? `o conteúdo TEM que ser baixado e mandado como arquivo, nunca só o link. Ache a URL da
