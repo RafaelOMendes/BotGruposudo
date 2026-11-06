@@ -1,5 +1,5 @@
 {
-  "name": "bot-whats-audio-gabreu",
+  "name": "bot-gruposudo",
   "version": "1.0.0",
   "description": "Responde o \"?\" do Gabriel Lassen no Gruposudo com um áudio",
   "main": "index.mjs",

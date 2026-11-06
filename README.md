@@ -1,4 +1,4 @@
-# 🎙️ Bot do Gabreu
+# 🤖 Bot do Gruposudo
 
 Bot de WhatsApp que fica de olho no grupo **Gruposudo**:
 
