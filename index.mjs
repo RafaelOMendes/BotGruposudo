@@ -71,7 +71,9 @@ const CONFIG = {
     // Intervalo mínimo entre respostas para a mesma pessoa.
     intervaloSeg: local.mencao?.intervaloSeg ?? 10,
     // Quantas mensagens recentes do grupo vão como contexto.
-    historico: local.mencao?.historico ?? 20,
+    historico: local.mencao?.historico ?? 8,
+    // Quando pedem para ler/resumir a conversa ("lê aí", "o que o fulano falou?"), vai até este tanto.
+    historicoLeitura: local.mencao?.historicoLeitura ?? 60,
   },
 };
 
@@ -396,8 +398,8 @@ async function iniciar() {
       }
     }
 
-    const hist = (historicos.get(jid) || []).slice(0, -1); // a própria mensagem vai separada
-    log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${imagens.length ? ` (+${imagens.length} imagem)` : ''}`);
+    const { hist, leituraPedida } = historicoPara(jid, pedido);
+    log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${imagens.length ? ` (+${imagens.length} imagem)` : ''}${leituraPedida ? ` (lendo ${hist.length} mensagens)` : ''}`);
 
     // Pessoas marcadas na mensagem (fora o bot): viram os IDs do remetente se a pessoa criar uma regra.
     const outrosMarcados = (ctx?.mentionedJid || []).map(jidNormalizedUser).filter((j) => !meusIds().includes(j));
@@ -408,7 +410,7 @@ async function iniciar() {
       let anexos = [];
       try {
         const v = await interpretarMencao({
-          grupo: meta.subject, historico: hist, autor, pedido, citada, imagens, regras: regras.resumo(jid),
+          grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
           temVideo: temDownloaderDeVideo(),
         });
         resposta = v.texto;
@@ -542,7 +544,7 @@ async function iniciar() {
           guardarEnviada(await sock.sendMessage(jid, { sticker: meme }, { quoted: m }));
         } else if (acao === 'ia' && ia) {
           await sock.sendPresenceUpdate('composing', jid).catch(() => {});
-          const hist = (historicos.get(jid) || []).slice(0, -1);
+          const hist = (historicos.get(jid) || []).slice(0, -1).slice(-CONFIG.mencao.historico);
           const resposta = await respostaDeRegra({ grupo: meta.subject, historico: hist, autor, mensagem: texto, instrucao: arg, imagens });
           await sock.sendPresenceUpdate('paused', jid).catch(() => {});
           guardarEnviada(await sock.sendMessage(jid, { text: resposta }, { quoted: m }));
@@ -558,12 +560,23 @@ async function iniciar() {
 
   // Histórico curto por grupo (só em memória), usado como contexto para o Claude.
   const historicos = new Map();
+  const horaBrasil = () => new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
   function registrar(jid, nome, texto) {
     if (!texto) return;
     const lista = historicos.get(jid) || [];
-    lista.push(`${nome}: ${texto.replace(/\s+/g, ' ').slice(0, 500)}`);
-    while (lista.length > CONFIG.mencao.historico + 1) lista.shift();
+    lista.push(`[${horaBrasil()}] ${nome}: ${texto.replace(/\s+/g, ' ').slice(0, 500)}`);
+    while (lista.length > CONFIG.mencao.historicoLeitura + 1) lista.shift();
     historicos.set(jid, lista);
+  }
+
+  // Pedidos do tipo "lê aí", "resume a conversa", "o que o fulano falou?" liberam o histórico longo.
+  // (testado no texto sem acentos, porque o \b do regex não entende letra acentuada)
+  const PEDE_LEITURA = /\b(le|ler|leia|leu|resum\w*|o que (o|a)?\s*\w*\s*(falou|disse|mandou|quis dizer)|que (ele|ela|eles|elas) (falou|disse|falaram|disseram)|conversa|historico|mensagens? (de )?(cima|antes|anterior\w*)|la em cima|acima|contexto|do que (voces|vcs|eles|elas) (estao|tao) falando)\b/i;
+
+  function historicoPara(jid, pedido) {
+    const tudo = (historicos.get(jid) || []).slice(0, -1); // a própria mensagem vai separada
+    const leituraPedida = PEDE_LEITURA.test(normalizar(pedido));
+    return { hist: leituraPedida ? tudo : tudo.slice(-CONFIG.mencao.historico), leituraPedida };
   }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {

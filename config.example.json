@@ -18,7 +18,8 @@
   "mencao": {
     "ativo": true,
     "intervaloSeg": 10,
-    "historico": 20
+    "historico": 8,
+    "historicoLeitura": 60
   },
   "links": {
     "ativo": true,
