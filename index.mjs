@@ -427,6 +427,10 @@ async function iniciar() {
       let anexos = [];
       let figurinhaPronta = null;
       let servico = null; // quando o bot fez um serviço (não só respondeu), a mensagem leva uma marca
+      // Gerar imagem leva ~1 a 2 min: avisa na hora para ninguém achar que travou.
+      const avisarGerando = async () => {
+        guardarEnviada(await sock.sendMessage(jid, { text: marcaServico('Gerando imagem', 'Começou aqui, leva uns 1 a 2 minutos.') }, { quoted: m }));
+      };
       try {
         const v = await interpretarMencao({
           grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
@@ -459,6 +463,7 @@ async function iniciar() {
           else {
             try {
               await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+              await avisarGerando();
               const png = await gerarImagem(v.imagem_gerada.prompt, { formato: v.imagem_gerada.formato });
               anexos.push({ url: '', gerada: png });
               servico = 'Imagem gerada';
@@ -473,6 +478,7 @@ async function iniciar() {
         // Figurinha pedida (de imagem mandada, da web, de meme, só texto ou gerada pela IA).
         if (v.acao === 'responder' && v.figurinha?.fazer) {
           try {
+            if (v.figurinha.origem === 'gerada') await avisarGerando();
             figurinhaPronta = await montarFigurinha(v.figurinha, imagens);
             servico = 'Figurinha';
             log(`Figurinha (${v.figurinha.origem}) feita para ${autor}.`);

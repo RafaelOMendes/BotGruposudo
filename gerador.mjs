@@ -20,7 +20,11 @@ let fila = Promise.resolve();
  * @param {(msg: string) => void} [c.log]
  */
 export function configurarGerador(c) {
-  cfg = { porta: 8188, liberarVramMin: 5, log: () => {}, ...c };
+  // dispositivoTexto "cpu": o codificador de texto (7,6 GB) roda no processador e o modelo de imagem
+  // fica fixo na placa (16 GB não comportam os dois; trocar a cada pedido é lento e derrubava o ComfyUI).
+  cfg = { porta: 8188, liberarVramMin: 5, argsExtras: ['--disable-pinned-memory'],
+    // Liga os kernels de flash attention da AMD (AOTriton) que já vêm no PyTorch: ~5x mais rápido na RX 9060 XT.
+    env: { TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1' }, passos: 8, dispositivoTexto: 'cpu', log: () => {}, ...c };
   return disponivel();
 }
 
@@ -55,14 +59,19 @@ async function garantirNoAr() {
   iniciando = (async () => {
     cfg.log('Ligando o ComfyUI...');
     const py = path.join(cfg.pasta, 'python_embeded', 'python.exe');
-    processo = spawn(py, ['-s', path.join('ComfyUI', 'main.py'), '--listen', '127.0.0.1', '--port', String(cfg.porta), '--disable-auto-launch'], {
+    processo = spawn(py, ['-s', path.join('ComfyUI', 'main.py'), '--listen', '127.0.0.1', '--port', String(cfg.porta), '--disable-auto-launch', ...cfg.argsExtras], {
       cwd: cfg.pasta,
+      env: { ...process.env, ...cfg.env },
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     let erro = '';
     processo.stderr.on('data', (d) => { erro = (erro + d).slice(-2000); });
-    processo.on('exit', (code) => { cfg.log(`ComfyUI fechou (código ${code}).`); processo = null; });
+    processo.on('exit', (code) => {
+      const motivo = erro.split('\n').map((l) => l.trim()).filter((l) => /error|exception|fatal|Traceback/i.test(l)).slice(-3).join(' | ');
+      cfg.log(`ComfyUI fechou (código ${code})${motivo ? `: ${motivo.slice(0, 400)}` : ''}.`);
+      processo = null;
+    });
     const limite = Date.now() + 3 * 60_000;
     while (Date.now() < limite) {
       if (await estaNoAr()) { cfg.log('ComfyUI no ar.'); return; }
@@ -90,10 +99,10 @@ function agendarLiberacao() {
 }
 
 // Workflow (formato API) do Z-Image Turbo, igual ao template oficial do ComfyUI.
-function workflow(prompt, { largura, altura, semente }) {
+function workflow(prompt, { largura, altura, semente, passos }) {
   return {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: 'z_image_turbo_bf16.safetensors', weight_dtype: 'default' } },
-    '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_3_4b.safetensors', type: 'lumina2', device: 'default' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_3_4b.safetensors', type: 'lumina2', device: cfg.dispositivoTexto } },
     '3': { class_type: 'VAELoader', inputs: { vae_name: 'ae.safetensors' } },
     '4': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
     '5': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: prompt } },
@@ -103,10 +112,12 @@ function workflow(prompt, { largura, altura, semente }) {
       class_type: 'KSampler',
       inputs: {
         model: ['4', 0], positive: ['5', 0], negative: ['6', 0], latent_image: ['7', 0],
-        seed: semente, steps: 8, cfg: 1, sampler_name: 'res_multistep', scheduler: 'simple', denoise: 1,
+        seed: semente, steps: passos, cfg: 1, sampler_name: 'res_multistep', scheduler: 'simple', denoise: 1,
       },
     },
-    '9': { class_type: 'VAEDecode', inputs: { samples: ['8', 0], vae: ['3', 0] } },
+    // Decodificação em blocos: gasta pouca VRAM, então o modelo não precisa sair da placa (era aí que o
+    // ComfyUI caía no Windows/ROCm).
+    '9': { class_type: 'VAEDecodeTiled', inputs: { samples: ['8', 0], vae: ['3', 0], tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 } },
     '10': { class_type: 'SaveImage', inputs: { images: ['9', 0], filename_prefix: 'bot_gabreu' } },
   };
 }
@@ -118,13 +129,22 @@ const FORMATOS = { quadrado: [1024, 1024], retrato: [832, 1216], paisagem: [1216
  * @param {string} prompt descrição da imagem (de preferência em inglês, bem detalhada)
  * @param {{formato?: 'quadrado'|'retrato'|'paisagem'}} [opcoes]
  */
-export function gerarImagem(prompt, { formato = 'quadrado' } = {}) {
-  const tarefa = fila.then(() => gerarAgora(prompt, formato));
+export function gerarImagem(prompt, { formato = 'quadrado', passos } = {}) {
+  const tarefa = fila.then(async () => {
+    try {
+      return await gerarAgora(prompt, formato, passos || cfg.passos);
+    } catch (e) {
+      // Se o ComfyUI caiu no meio (acontece no ROCm do Windows), religa e tenta mais uma vez.
+      if (await estaNoAr()) throw e;
+      cfg.log(`ComfyUI caiu (${e.message}); religando e tentando de novo...`);
+      return gerarAgora(prompt, formato, passos || cfg.passos);
+    }
+  });
   fila = tarefa.catch(() => {});
   return tarefa;
 }
 
-async function gerarAgora(prompt, formato) {
+async function gerarAgora(prompt, formato, passos) {
   if (!disponivel()) throw new Error('gerador de imagem não instalado');
   await garantirNoAr();
   clearTimeout(timerOcioso);
@@ -135,7 +155,7 @@ async function gerarAgora(prompt, formato) {
   const r = await fetch(`${base()}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflow(prompt, { largura, altura, semente }), client_id: 'bot-gabreu' }),
+    body: JSON.stringify({ prompt: workflow(prompt, { largura, altura, semente, passos }), client_id: 'bot-gabreu' }),
   });
   const enviado = await r.json();
   if (!r.ok || !enviado.prompt_id) throw new Error(`ComfyUI recusou: ${JSON.stringify(enviado.error || enviado).slice(0, 300)}`);

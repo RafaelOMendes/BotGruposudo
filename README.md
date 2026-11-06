@@ -10,6 +10,7 @@ Bot de WhatsApp que fica de olho no grupo **Gruposudo**:
 - ↩️ **Responder o bot conta como falar com ele:** usar a função "responder" do WhatsApp numa mensagem do bot já faz ele responder, sem precisar marcar.
 - ❓ **Na dúvida, pergunta:** se o pedido não estiver claro (qual vídeo, que texto vai na figurinha...), o bot pergunta em vez de chutar.
 - 🤖 **Serviço fica evidente:** quando o bot faz algo (baixar vídeo, fazer figurinha, criar/apagar regra), a mensagem vem com `🤖 Serviço: ...` no topo; respostas comuns não.
+- 🎨 **Gera imagem e figurinha com IA local:** "@bot gera uma imagem de..." ou "faz uma figurinha de..." usa o [ComfyUI](https://github.com/Comfy-Org/ComfyUI) com o modelo Z-Image Turbo na placa de vídeo (AMD via ROCm). Leva ~1,5 min por imagem; o bot avisa quando começa. Config em `gerador` (pasta do ComfyUI portátil). O ComfyUI é ligado sob demanda e libera a VRAM após 5 min sem uso.
 - 🧩 **O grupo cria regras novas** marcando o bot, em linguagem normal (veja abaixo).
 
 ## Regras criadas pelo grupo
