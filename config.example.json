@@ -40,5 +40,19 @@
     "pasta": "E:/IA/ComfyUI_windows_portable",
     "porta": 8188,
     "liberarVramMin": 5
+  },
+  "entregas": {
+    "ativo": true,
+    "moodle": "https://seu.moodle/calendar/export_execute.php?userid=...&authtoken=...&preset_what=all&preset_time=recentupcoming",
+    "calendarios": [
+      {
+        "nome": "Outro calendário",
+        "url": "https://.../basic.ics"
+      }
+    ],
+    "classroom": {
+      "clientId": "xxxx.apps.googleusercontent.com",
+      "clientSecret": "GOCSPX-..."
+    }
   }
 }

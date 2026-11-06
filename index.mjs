@@ -28,7 +28,8 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { avaliarNonsense, configurarModelos, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { avaliarEntregas, avaliarNonsense, configurarModelos, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { iniciarAvisos } from './entregas.mjs';
 import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
@@ -244,6 +245,34 @@ const groupCache =new NodeCache({ stdTTL: 5 * 60, useClones: false });
 const msgRetryCounterCache = new NodeCache();
 const jaRespondidas = new Set();
 
+// Conexão atual (troca a cada reconexão) e fila do Claude, compartilhadas com os avisos de entregas.
+let sockAtual = null;
+let conectado = false;
+let filaClaude = Promise.resolve(); // uma pergunta por vez para o claude
+const naFilaDoClaude = (f) => {
+  const p = filaClaude.then(f);
+  filaClaude = p.catch(() => {});
+  return p;
+};
+
+// ---------- avisos de entregas da faculdade (12h, 20h e 22h) ----------
+if (local.entregas?.ativo && ia) {
+  iniciarAvisos({
+    cfg: local.entregas,
+    avaliar: avaliarEntregas,
+    fila: naFilaDoClaude,
+    log,
+    enviar: async (texto) => {
+      if (!sockAtual || !conectado) return false;
+      const grupos = await sockAtual.groupFetchAllParticipating();
+      const grupo = Object.values(grupos).find((g) => normalizar(g.subject) === normalizar(CONFIG.grupo));
+      if (!grupo) { log(`Entregas: grupo "${CONFIG.grupo}" não encontrado.`); return false; }
+      guardarEnviada(await sockAtual.sendMessage(grupo.id, { text: texto }));
+      return true;
+    },
+  });
+}
+
 // ---------- conexão ----------
 async function iniciar() {
   const { state, saveCreds } = await useMultiFileAuthState(path.join(DIR, '.baileys_auth'));
@@ -262,6 +291,7 @@ async function iniciar() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+  sockAtual = sock;
 
   async function metadadosGrupo(jid) {
     let meta = groupCache.get(jid);
@@ -281,6 +311,7 @@ async function iniciar() {
       mostrarQr(qr).catch((e) => log('Erro ao gerar imagem do QR:', e.message));
     }
     if (connection === 'open') {
+      conectado = true;
       fecharQr();
       log(`Bot pronto. Ouvindo "?" de ${CONFIG.remetente} em ${CONFIG.grupo}.`);
       for (const [tipo, r] of Object.entries(respostas)) if (!r.buffer) log(`Figurinha de resposta não encontrada em ${r.arquivo}; resposta a ${tipo} desligada.`);
@@ -290,8 +321,10 @@ async function iniciar() {
       log(`Modelos: ${Object.entries(modelos).map(([t, m]) => `${t}=${m.modelo.replace('claude-', '')}/${m.esforco}`).join(', ')}.`);
       log(`Gerador de imagem (ComfyUI): ${geradorOk ? `pronto em ${CONFIG.gerador.pasta}` : 'desligado/não instalado'}.`);
       log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
+      log(`Entregas (Moodle/Classroom): ${local.entregas?.ativo && ia ? 'avisos às 12h, 20h e 22h' : 'desligadas'}.`);
     }
     if (connection === 'close') {
+      conectado = false;
       const codigo = lastDisconnect?.error?.output?.statusCode;
       if (codigo === DisconnectReason.loggedOut) {
         log('Sessão desconectada pelo celular. Apague a pasta .baileys_auth e rode de novo para escanear o QR.');
@@ -378,7 +411,6 @@ async function iniciar() {
     return downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
   }
 
-  let filaClaude = Promise.resolve(); // uma pergunta por vez para o claude
   const ultimaMencao = new Map(); // autor -> timestamp
 
   async function responderMarcacao(m, jid, meta) {
