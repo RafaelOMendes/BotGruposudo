@@ -236,8 +236,8 @@ mostrar alguma coisa (notícia, placar, preço, link, informação, imagem, meme
      - imagem / gif / documento / audio / video de arquivo: URL https DIRETA do arquivo (ex: termina em
        .jpg, .png, .webp, .gif, .mp4, .mp3, .m4a, .pdf, .docx... ou é claramente o arquivo, como
        upload.wikimedia.org ou i.imgur.com). Use WebFetch na página para achar a URL do arquivo.
-     - video / audio de sites (YouTube, TikTok, Instagram, X, Reddit, Facebook, Vimeo, SoundCloud):
-       {{VIDEO}}
+     - vídeo / áudio das redes (TikTok, X/Twitter, YouTube, Instagram, Facebook, Threads, Reddit, Kwai,
+       Pinterest, Twitch, Vimeo, SoundCloud, Bluesky e afins): {{VIDEO}}
      O texto vira a legenda/mensagem junto. Não diga que mandou algo que não está em "anexos". Se não
      achar um arquivo que dê para baixar, diga isso e mande o link da página no texto.
   5. Se o pedido for vago, use o histórico do grupo para entender do que se trata; só pergunte se
@@ -290,7 +290,12 @@ export async function interpretarMencao({ grupo, historico, autor, pedido, citad
 
   const r = await perguntar({
     sistema: SISTEMA_MENCAO(grupo, temVideo).replace('{{VIDEO}}', temVideo
-      ? 'a URL da página do vídeo/música serve: o bot baixa com o yt-dlp (até 15 min e ~45 MB).'
+      ? `o conteúdo TEM que ser baixado e mandado como arquivo, nunca só o link. Ache a URL da
+       postagem/vídeo específico (pesquise até achar o post certo) e coloque em "anexos" com tipo
+       "video" (ou "audio" se pediram só o som/música): o bot baixa com o yt-dlp (até 15 min e ~45 MB).
+       Para FOTO de post (Instagram, X...), ache a URL direta da imagem (ex: pbs.twimg.com,
+       cdninstagram.com) e use tipo "imagem". Se mandarem um link dessas redes no grupo e pedirem o
+       conteúdo, use esse link. O link pode ir no texto também, mas o arquivo vai em "anexos".`
       : 'o bot ainda NÃO consegue baixar desses sites; mande o link no texto em vez de anexo.'),
     conteudo: await conteudoCom(imagens, partes.join('\n\n')),
     schema: SCHEMA_MENCAO,

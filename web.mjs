@@ -90,9 +90,59 @@ const extensao = (url) => (path.extname(new URL(url).pathname).slice(1) || '').t
 const nomeDoArquivo = (url, padrao) => decodeURIComponent(path.basename(new URL(url).pathname)) || padrao;
 
 // ---------- yt-dlp (opcional) ----------
-const SITES_VIDEO = /(^|\.)(youtube\.com|youtu\.be|tiktok\.com|instagram\.com|twitter\.com|x\.com|reddit\.com|redd\.it|facebook\.com|fb\.watch|vimeo\.com|twitch\.tv|kwai\.com|dailymotion\.com|soundcloud\.com)$/i;
+const SITES_VIDEO = /(^|\.)(youtube\.com|youtu\.be|tiktok\.com|instagram\.com|twitter\.com|x\.com|threads\.net|threads\.com|reddit\.com|redd\.it|facebook\.com|fb\.watch|vimeo\.com|twitch\.tv|kwai\.com|kw\.ai|dailymotion\.com|soundcloud\.com|pinterest\.com|pin\.it|bilibili\.com|streamable\.com|snapchat\.com|linkedin\.com|tumblr\.com|9gag\.com|imgur\.com|bsky\.app|spotify\.com)$/i;
 let ytdlp = null;
 let ffmpeg = null;
+
+// O bot pode ter sido iniciado por um processo com o PATH antigo (antes de instalar as
+// ferramentas). Então, se não achar no PATH, procura nas pastas onde o winget instala.
+function procurarExecutavel(nome) {
+  const local = process.env.LOCALAPPDATA;
+  if (!local) return null;
+  const links = path.join(local, 'Microsoft', 'WinGet', 'Links', `${nome}.exe`);
+  if (fs.existsSync(links)) return links;
+  const pacotes = path.join(local, 'Microsoft', 'WinGet', 'Packages');
+  if (!fs.existsSync(pacotes)) return null;
+  const busca = (dir, nivel) => {
+    if (nivel > 3) return null;
+    let itens;
+    try { itens = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+    const exe = itens.find((i) => i.isFile() && i.name.toLowerCase() === `${nome}.exe`);
+    if (exe) return path.join(dir, exe.name);
+    for (const i of itens) {
+      if (!i.isDirectory()) continue;
+      const achou = busca(path.join(dir, i.name), nivel + 1);
+      if (achou) return achou;
+    }
+    return null;
+  };
+  // Prioriza o pacote com o nome da ferramenta (ex: yt-dlp.yt-dlp, Gyan.FFmpeg).
+  const dirs = fs.readdirSync(pacotes).sort((a, b) => Number(b.toLowerCase().includes(nome)) - Number(a.toLowerCase().includes(nome)));
+  for (const d of dirs) {
+    const achou = busca(path.join(pacotes, d), 1);
+    if (achou) return achou;
+  }
+  return null;
+}
+
+// Coloca a pasta do executável no PATH deste processo (o yt-dlp precisa achar o ffmpeg e o deno).
+function adicionarAoPath(arquivo) {
+  if (!arquivo) return;
+  const dir = path.dirname(arquivo);
+  const atual = process.env.PATH || '';
+  if (!atual.split(path.delimiter).includes(dir)) process.env.PATH = `${dir}${path.delimiter}${atual}`;
+}
+
+async function acharFerramenta(preferido, nome, argVersao) {
+  for (const candidato of [preferido, procurarExecutavel(nome)].filter(Boolean)) {
+    try {
+      await rodar(candidato, [argVersao], os.tmpdir(), 20_000);
+      if (path.isAbsolute(candidato)) adicionarAoPath(candidato);
+      return candidato;
+    } catch { /* tenta o próximo */ }
+  }
+  return null;
+}
 
 function rodar(cmd, args, cwd, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -107,19 +157,10 @@ function rodar(cmd, args, cwd, timeoutMs) {
 
 /** Procura o yt-dlp (e diz se dá para juntar áudio+vídeo, o que precisa do ffmpeg). */
 export async function iniciarDownloads(caminho = 'yt-dlp', caminhoFfmpeg = 'ffmpeg') {
-  try {
-    await rodar(caminho, ['--version'], os.tmpdir(), 20_000);
-    ytdlp = caminho;
-  } catch {
-    ytdlp = null;
-  }
-  try {
-    await rodar(caminhoFfmpeg, ['-version'], os.tmpdir(), 20_000);
-    ffmpeg = caminhoFfmpeg;
-  } catch {
-    ffmpeg = null;
-  }
-  return { ytdlp: !!ytdlp, ffmpeg: !!ffmpeg };
+  ffmpeg = await acharFerramenta(caminhoFfmpeg, 'ffmpeg', '-version');
+  adicionarAoPath(procurarExecutavel('deno')); // o yt-dlp usa o deno no YouTube
+  ytdlp = await acharFerramenta(caminho, 'yt-dlp', '--version');
+  return { ytdlp: !!ytdlp, ffmpeg: !!ffmpeg, caminhoYtdlp: ytdlp, caminhoFfmpeg: ffmpeg };
 }
 
 /** Converte GIF/vídeo para MP4 (H.264 + AAC) que o WhatsApp toca. Precisa do ffmpeg. */
@@ -186,27 +227,41 @@ async function gifComoFigurinha(buffer) {
     .toBuffer();
 }
 
-/**
- * Baixa um anexo e devolve o conteúdo pronto para o sock.sendMessage do Baileys.
- * @param {{url: string, tipo: 'imagem'|'gif'|'video'|'audio'|'documento', nome?: string}} anexo
- * @param {string} legenda
- */
-export async function prepararAnexo({ url, tipo, nome }, legenda = '') {
-  if ((tipo === 'video' || tipo === 'audio') && ehSiteDeVideo(url)) {
-    const { buffer, ext } = await baixarComYtdlp(url, tipo);
-    if (tipo === 'audio') return { audio: buffer, mimetype: ext === 'mp3' ? 'audio/mpeg' : 'audio/mp4' };
-    if (ext === 'mp4') return { video: buffer, mimetype: 'video/mp4', caption: legenda };
-    if (ffmpeg) return { video: await paraMp4(buffer, ext), mimetype: 'video/mp4', caption: legenda };
-    return { document: buffer, mimetype: `video/${ext}`, fileName: `video.${ext}`, caption: legenda };
-  }
+// Formatos que o WhatsApp toca direto; o resto é convertido com o ffmpeg.
+// (.ogg/.opus da web podem ser Vorbis, que o WhatsApp não toca: esses passam pelo ffmpeg.)
+const AUDIO_NATIVO = { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac' };
+const EXT_AUDIO = ['mp3', 'm4a', 'aac', 'ogg', 'opus', 'wav', 'flac', 'webm', 'weba', 'wma', 'amr'];
+const EXT_VIDEO = ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', '3gp', 'wmv', 'flv'];
+const EXT_IMAGEM = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff', 'avif', 'heic'];
 
-  const ext = extensao(url);
-  if (tipo === 'imagem') {
-    const { buffer } = await baixarBytes(url, LIMITE.imagem);
-    return { image: await comoImagem(buffer), caption: legenda };
+/** Converte qualquer áudio para MP3 (o WhatsApp toca). Precisa do ffmpeg. */
+async function paraMp3(buffer, extEntrada) {
+  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-ff-'));
+  try {
+    const entrada = path.join(pasta, `in.${extEntrada || 'bin'}`);
+    fs.writeFileSync(entrada, buffer);
+    await rodar(ffmpeg, ['-y', '-i', entrada, '-vn', '-c:a', 'libmp3lame', '-b:a', '128k', 'saida.mp3'], pasta, 3 * 60_000);
+    return fs.readFileSync(path.join(pasta, 'saida.mp3'));
+  } finally {
+    fs.rmSync(pasta, { recursive: true, force: true });
   }
+}
+
+/** Qual é o tipo de verdade do arquivo (pelo content-type, depois pela extensão). */
+function tipoReal(mime, ext, pedido) {
+  if (mime === 'image/gif' || ext === 'gif') return 'gif';
+  if (mime.startsWith('image/') || EXT_IMAGEM.includes(ext)) return 'imagem';
+  if (mime.startsWith('video/') || EXT_VIDEO.includes(ext)) return pedido === 'audio' ? 'audio' : 'video';
+  if (mime.startsWith('audio/') || EXT_AUDIO.includes(ext)) return 'audio';
+  if (DOCUMENTOS_OK.has(ext) || mime === 'application/pdf') return 'documento';
+  return null;
+}
+
+/** Monta a mensagem no tipo certo: vídeo vai como vídeo, áudio como áudio, etc. */
+async function montar(tipo, buffer, { mime = '', ext = '', nome = '', url = '', legenda = '' }) {
+  if (tipo === 'imagem') return { image: await comoImagem(buffer), caption: legenda };
+
   if (tipo === 'gif') {
-    const { buffer, tipo: mime } = await baixarBytes(url, LIMITE.gif);
     if (mime === 'video/mp4' || ext === 'mp4') return { video: buffer, mimetype: 'video/mp4', gifPlayback: true, caption: legenda };
     if (ffmpeg) {
       try {
@@ -215,25 +270,53 @@ export async function prepararAnexo({ url, tipo, nome }, legenda = '') {
     }
     return { sticker: await gifComoFigurinha(buffer) };
   }
+
   if (tipo === 'video') {
-    const { buffer, tipo: mime } = await baixarBytes(url, LIMITE.video);
-    if (!mime.startsWith('video/') && ext !== 'mp4') throw new Error(`não é vídeo (${mime || 'tipo desconhecido'})`);
     if (mime === 'video/mp4' || ext === 'mp4') return { video: buffer, mimetype: 'video/mp4', caption: legenda };
-    if (ffmpeg) return { video: await paraMp4(buffer, ext || mime.split('/')[1]), mimetype: 'video/mp4', caption: legenda };
-    return { document: buffer, mimetype: mime, fileName: nome || nomeDoArquivo(url, 'video'), caption: legenda };
+    if (ffmpeg) return { video: await paraMp4(buffer, ext || (mime.split('/')[1] || 'bin')), mimetype: 'video/mp4', caption: legenda };
+    return { document: buffer, mimetype: mime || 'video/mp4', fileName: nome || `video.${ext || 'mp4'}`, caption: legenda };
   }
+
   if (tipo === 'audio') {
-    const { buffer, tipo: mime } = await baixarBytes(url, LIMITE.audio);
-    if (!mime.startsWith('audio/') && !['mp3', 'm4a', 'ogg', 'opus', 'aac', 'wav'].includes(ext)) throw new Error(`não é áudio (${mime || 'tipo desconhecido'})`);
-    return { audio: buffer, mimetype: mime.startsWith('audio/') ? mime : 'audio/mpeg' };
+    if (AUDIO_NATIVO[ext] && !EXT_VIDEO.includes(ext)) return { audio: buffer, mimetype: AUDIO_NATIVO[ext] };
+    if (mime === 'audio/mpeg') return { audio: buffer, mimetype: 'audio/mpeg' };
+    if (ffmpeg) return { audio: await paraMp3(buffer, ext || (mime.split('/')[1] || 'bin')), mimetype: 'audio/mpeg' };
+    return { document: buffer, mimetype: mime || 'audio/mpeg', fileName: nome || `audio.${ext || 'mp3'}`, caption: legenda };
   }
+
   if (tipo === 'documento') {
-    if (!DOCUMENTOS_OK.has(ext)) throw new Error(`tipo de documento não permitido (.${ext || '?'})`);
-    const { buffer, tipo: mime } = await baixarBytes(url, LIMITE.documento);
-    if (mime === 'text/html') throw new Error('o link é uma página, não um arquivo');
-    return { document: buffer, mimetype: MIME_DOC[ext] || 'application/octet-stream', fileName: nome || nomeDoArquivo(url, `arquivo.${ext}`), caption: legenda };
+    if (!DOCUMENTOS_OK.has(ext) && mime !== 'application/pdf') throw new Error(`tipo de documento não permitido (.${ext || '?'})`);
+    const e = DOCUMENTOS_OK.has(ext) ? ext : 'pdf';
+    return { document: buffer, mimetype: MIME_DOC[e] || 'application/octet-stream', fileName: nome || nomeDoArquivo(url, `arquivo.${e}`), caption: legenda };
   }
   throw new Error(`tipo de anexo desconhecido: ${tipo}`);
+}
+
+/**
+ * Baixa um anexo e devolve o conteúdo pronto para o sock.sendMessage do Baileys, no tipo real do
+ * arquivo (vídeo como vídeo, áudio como áudio, imagem como imagem, documento como documento).
+ * @param {{url: string, tipo: 'imagem'|'gif'|'video'|'audio'|'documento', nome?: string}} anexo
+ * @param {string} legenda
+ */
+export async function prepararAnexo({ url, tipo, nome }, legenda = '') {
+  // Redes sociais (TikTok, X, YouTube, Instagram...): baixa com o yt-dlp.
+  if (ehSiteDeVideo(url) && tipo !== 'imagem' && tipo !== 'documento') {
+    const { buffer, ext } = await baixarComYtdlp(url, tipo === 'audio' ? 'audio' : 'video');
+    return montar(tipo === 'audio' ? 'audio' : 'video', buffer, { ext, nome, url, legenda });
+  }
+
+  // Arquivo direto: baixa uma vez e decide pelo tipo de verdade (o "tipo" do Claude é só uma dica).
+  if (tipo === 'documento' && !DOCUMENTOS_OK.has(extensao(url)) && extensao(url)) {
+    throw new Error(`tipo de documento não permitido (.${extensao(url)})`);
+  }
+  const limite = LIMITE[tipo] || LIMITE.documento;
+  const { buffer, tipo: mime } = await baixarBytes(url, Math.max(limite, LIMITE.video));
+  if (mime === 'text/html') throw new Error('o link é uma página, não um arquivo');
+  const ext = extensao(url);
+  const real = tipoReal(mime, ext, tipo);
+  if (!real) throw new Error(`não sei mandar esse tipo de arquivo (${mime || ext || 'desconhecido'})`);
+  if (buffer.length > LIMITE[real]) throw new Error(`${real} maior que ${LIMITE[real] / MB} MB`);
+  return montar(real, buffer, { mime, ext, nome, url, legenda });
 }
 
 /** Compatibilidade: baixa só uma imagem (JPEG). */
