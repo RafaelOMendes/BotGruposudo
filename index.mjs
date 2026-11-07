@@ -456,8 +456,30 @@ async function iniciar() {
 
     const respondeuBot = !!(ctx?.participant && meusIds().includes(jidNormalizedUser(ctx.participant)));
 
-    const tarefa = async () => {
+    // 1) Só a pergunta ao Claude entra na fila (uma por vez).
+    const decidir = async () => {
       await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+      // Pergunta sobre trabalho/prova/prazo → consulta Moodle e Classroom e manda a lista junto.
+      let entregas = '';
+      if (local.entregas?.ativo && PERGUNTA_ENTREGA.test(`${pedido} ${citada}`)) {
+        try {
+          entregas = await listaParaPergunta(local.entregas, { log });
+          log(`Marcação sobre entregas: lista do Moodle/Classroom enviada ao Claude.`);
+        } catch (e) {
+          log(`Não deu para buscar as entregas (${e.message}).`);
+        }
+      }
+      return interpretarMencao({
+        entregas,
+        grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
+        temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
+        pessoas: pessoasParaPrompt(jid),
+      });
+    };
+
+    // 2) O resto (gerar imagem, baixar, enviar) roda fora da fila: enquanto uma imagem gera,
+    //    o bot continua respondendo as outras marcações.
+    const tarefa = async (v, erroClaude) => {
       let resposta;
       let anexos = [];
       let figurinhaPronta = null;
@@ -467,22 +489,7 @@ async function iniciar() {
         guardarEnviada(await sock.sendMessage(jid, { text: marcaServico('Gerando imagem', 'Começou aqui, leva uns 1 a 2 minutos.') }, { quoted: m }));
       };
       try {
-        // Pergunta sobre trabalho/prova/prazo → consulta Moodle e Classroom e manda a lista junto.
-        let entregas = '';
-        if (local.entregas?.ativo && PERGUNTA_ENTREGA.test(`${pedido} ${citada}`)) {
-          try {
-            entregas = await listaParaPergunta(local.entregas, { log });
-            log(`Marcação sobre entregas: lista do Moodle/Classroom enviada ao Claude.`);
-          } catch (e) {
-            log(`Não deu para buscar as entregas (${e.message}).`);
-          }
-        }
-        const v = await interpretarMencao({
-          entregas,
-          grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
-          temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
-          pessoas: pessoasParaPrompt(jid),
-        });
+        if (erroClaude) throw erroClaude;
         resposta = v.texto;
         if (v.usouModeloMaior) log(`Pedido de ${autor} era complexo: refeito no ${modelos.complexo.modelo}.`);
         if (v.acao === 'responder' && Array.isArray(v.anexos)) anexos = v.anexos.filter((a) => a?.url).slice(0, 3);
@@ -515,8 +522,10 @@ async function iniciar() {
               servico = 'Imagem gerada';
               log(`Imagem gerada para ${autor}: "${v.imagem_gerada.prompt.slice(0, 80)}"`);
             } catch (e) {
-              log(`Não deu para gerar a imagem (${e.message}).`);
-              resposta = `Não consegui gerar a imagem: ${e.message}.`;
+              log(`Não deu para gerar a imagem depois de 3 tentativas (${e.message}).`);
+              resposta = falhaAmigavel('imagem');
+              // Guarda o prompt no histórico: se pedirem "tenta de novo", o Claude sabe o que era.
+              registrar(jid, 'Bot (nota interna)', `a imagem não saiu; prompt usado: ${v.imagem_gerada.prompt}`);
             }
           }
         }
@@ -530,7 +539,10 @@ async function iniciar() {
             log(`Figurinha (${v.figurinha.origem}) feita para ${autor}.`);
           } catch (e) {
             log(`Não deu para fazer a figurinha (${e.message}).`);
-            resposta = `Não consegui fazer a figurinha: ${e.message}.`;
+            if (v.figurinha.origem === 'gerada') {
+              resposta = falhaAmigavel('figurinha');
+              registrar(jid, 'Bot (nota interna)', `a figurinha não saiu; prompt usado: ${v.figurinha.prompt}`);
+            } else resposta = `Não consegui fazer a figurinha: ${e.message}.`; // ex: "manda a imagem junto"
           }
         }
 
@@ -577,7 +589,11 @@ async function iniciar() {
       registrar(jid, 'Bot', resposta || '[anexo]');
       log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}${figurinhaPronta ? ' + figurinha' : ''}`);
     };
-    filaClaude = filaClaude.then(tarefa).catch((e) => log('Erro ao responder marcação:', e.stack || e));
+    const decisao = filaClaude.then(decidir);
+    filaClaude = decisao.catch(() => {}); // libera a fila assim que o Claude responde
+    decisao
+      .then((v) => tarefa(v, null), (e) => tarefa(null, e))
+      .catch((e) => log('Erro ao responder marcação:', e.stack || e));
   }
 
   // ---------- marcar pessoas ----------
@@ -605,6 +621,16 @@ async function iniciar() {
       if (p) jids.push(p.id);
     }
     return jids;
+  }
+
+  // Gerador falhou 3 vezes: mensagem amigável no grupo (o erro técnico fica só no bot.log).
+  function falhaAmigavel(oque) {
+    const frases = [
+      `A placa de vídeo pediu arrego aqui: tentei 3 vezes e a ${oque} não saiu. Tenta de novo daqui a pouco.`,
+      `Tentei 3 vezes e a ${oque} empacou no forno. Me dá um minutinho e pede de novo.`,
+      `Deu ruim aqui no PC e a ${oque} não saiu, mesmo tentando 3 vezes. Pede de novo daqui a pouco que eu tento.`,
+    ];
+    return frases[Math.floor(Math.random() * frases.length)];
   }
 
   // Serviço (baixar, fazer figurinha, criar regra...) leva uma marca no topo; resposta comum não.

@@ -24,7 +24,7 @@ export function configurarGerador(c) {
   // fica fixo na placa (16 GB não comportam os dois; trocar a cada pedido é lento e derrubava o ComfyUI).
   cfg = { porta: 8188, liberarVramMin: 5, argsExtras: ['--disable-pinned-memory'],
     // Liga os kernels de flash attention da AMD (AOTriton) que já vêm no PyTorch: ~5x mais rápido na RX 9060 XT.
-    env: { TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1' }, passos: 8, dispositivoTexto: 'cpu', log: () => {}, ...c };
+    env: { TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1' }, passos: 8, dispositivoTexto: 'cpu', pesoModelo: 'default', log: () => {}, ...c };
   return disponivel();
 }
 
@@ -59,23 +59,32 @@ async function garantirNoAr() {
   iniciando = (async () => {
     cfg.log('Ligando o ComfyUI...');
     const py = path.join(cfg.pasta, 'python_embeded', 'python.exe');
-    processo = spawn(py, ['-s', path.join('ComfyUI', 'main.py'), '--listen', '127.0.0.1', '--port', String(cfg.porta), '--disable-auto-launch', ...cfg.argsExtras], {
+    // Um ComfyUI antigo ainda morrendo segura a porta: espera ele sair antes de ligar outro.
+    if (processo) {
+      const antigo = processo;
+      try { antigo.kill(); } catch { /* ok */ }
+      await new Promise((r) => { if (antigo.exitCode !== null) r(); else { antigo.once('exit', r); setTimeout(r, 10_000); } });
+    }
+    const filho = spawn(py, ['-s', path.join('ComfyUI', 'main.py'), '--listen', '127.0.0.1', '--port', String(cfg.porta), '--disable-auto-launch', ...cfg.argsExtras], {
       cwd: cfg.pasta,
       env: { ...process.env, ...cfg.env },
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
+    processo = filho;
     let erro = '';
-    processo.stderr.on('data', (d) => { erro = (erro + d).slice(-2000); });
-    processo.on('exit', (code) => {
-      const motivo = erro.split('\n').map((l) => l.trim()).filter((l) => /error|exception|fatal|Traceback/i.test(l)).slice(-3).join(' | ');
-      cfg.log(`ComfyUI fechou (código ${code})${motivo ? `: ${motivo.slice(0, 400)}` : ''}.`);
-      processo = null;
+    filho.stderr.on('data', (d) => { erro = (erro + d).slice(-4000); });
+    filho.on('exit', (code) => {
+      const linhas = erro.split('\n').map((l) => l.replace(/\x1b\[[0-9;]*m/g, '').trim()).filter(Boolean);
+      const motivo = linhas.filter((l) => /error|exception|fatal|Traceback/i.test(l)).slice(-3).join(' | ');
+      cfg.log(`ComfyUI fechou (código ${code})${motivo ? `: ${motivo.slice(0, 400)}` : ''}. Últimas linhas: ${linhas.slice(-3).join(' | ').slice(0, 400)}`);
+      // Só limpa se for o processo atual (o aviso de um antigo não pode apagar o novo).
+      if (processo === filho) processo = null;
     });
     const limite = Date.now() + 3 * 60_000;
     while (Date.now() < limite) {
       if (await estaNoAr()) { cfg.log('ComfyUI no ar.'); return; }
-      if (!processo) throw new Error(`ComfyUI não subiu: ${erro.split('\n').filter(Boolean).pop() || 'sem detalhes'}`);
+      if (filho.exitCode !== null) throw new Error(`ComfyUI não subiu: ${erro.split('\n').filter(Boolean).pop() || 'sem detalhes'}`);
       await new Promise((r) => setTimeout(r, 2000));
     }
     throw new Error('ComfyUI demorou demais para ligar');
@@ -101,7 +110,7 @@ function agendarLiberacao() {
 // Workflow (formato API) do Z-Image Turbo, igual ao template oficial do ComfyUI.
 function workflow(prompt, { largura, altura, semente, passos }) {
   return {
-    '1': { class_type: 'UNETLoader', inputs: { unet_name: 'z_image_turbo_bf16.safetensors', weight_dtype: 'default' } },
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: 'z_image_turbo_bf16.safetensors', weight_dtype: cfg.pesoModelo } },
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_3_4b.safetensors', type: 'lumina2', device: cfg.dispositivoTexto } },
     '3': { class_type: 'VAELoader', inputs: { vae_name: 'ae.safetensors' } },
     '4': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
@@ -129,16 +138,27 @@ const FORMATOS = { quadrado: [1024, 1024], retrato: [832, 1216], paisagem: [1216
  * @param {string} prompt descrição da imagem (de preferência em inglês, bem detalhada)
  * @param {{formato?: 'quadrado'|'retrato'|'paisagem'}} [opcoes]
  */
+export const TENTATIVAS = 3;
+
 export function gerarImagem(prompt, { formato = 'quadrado', passos } = {}) {
   const tarefa = fila.then(async () => {
-    try {
-      return await gerarAgora(prompt, formato, passos || cfg.passos);
-    } catch (e) {
-      // Se o ComfyUI caiu no meio (acontece no ROCm do Windows), religa e tenta mais uma vez.
-      if (await estaNoAr()) throw e;
-      cfg.log(`ComfyUI caiu (${e.message}); religando e tentando de novo...`);
-      return gerarAgora(prompt, formato, passos || cfg.passos);
+    // O ComfyUI às vezes cai no meio (erro 0xC0000005 do ROCm no Windows): religa e tenta de novo, até 3 vezes.
+    let ultimoErro;
+    for (let tentativa = 1; tentativa <= TENTATIVAS; tentativa++) {
+      try {
+        return await gerarAgora(prompt, formato, passos || cfg.passos);
+      } catch (e) {
+        ultimoErro = e;
+        if (e.message === 'gerador de imagem não instalado') break;
+        cfg.log(`Gerar imagem: tentativa ${tentativa}/${TENTATIVAS} falhou (${e.message})${tentativa < TENTATIVAS ? '; tentando de novo...' : '.'}`);
+        if (tentativa < TENTATIVAS) {
+          // Travado mas ainda "no ar"? Derruba para religar limpo na próxima tentativa.
+          if (processo && !(await estaNoAr())) { try { processo.kill(); } catch { /* ok */ } }
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
     }
+    throw ultimoErro;
   });
   fila = tarefa.catch(() => {});
   return tarefa;
