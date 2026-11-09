@@ -242,10 +242,14 @@ function salvarMensagens() {
 process.on('exit', salvarMensagens);
 function guardarMensagem(msg, nome) {
   if (!msg?.key?.id || !msg.message) return;
-  if (nome && !msg.key.fromMe) { lembrarNome(msg.key.participant, nome); lembrarNome(msg.key.participantAlt, nome); }
   const antes = mensagensGuardadas.get(msg.key.id);
+  // Mensagem do histórico traz o autor em msg.participant (não em msg.key.participant). E uma versão nova
+  // da mesma mensagem nunca apaga o que a anterior já sabia (autor, LID/número).
+  const key = { ...(antes?.key || {}), ...Object.fromEntries(Object.entries(msg.key).filter(([, v]) => v != null)) };
+  if (!key.participant && msg.participant) key.participant = msg.participant;
+  if (nome && !key.fromMe) { lembrarNome(key.participant, nome); lembrarNome(key.participantAlt, nome); }
   mensagensGuardadas.set(msg.key.id, {
-    key: { ...msg.key },
+    key,
     message: copiaDaMensagem(msg.message),
     nome: nome || antes?.nome || '',
     em: numero(msg.messageTimestamp) || antes?.em || Math.floor(Date.now() / 1000),
@@ -303,6 +307,18 @@ function nomeDaPessoa(...ids) {
   return '';
 }
 for (const g of mensagensGuardadas.values()) if (g.nome && !g.key.fromMe) { lembrarNome(g.key.participant, g.nome); lembrarNome(g.key.participantAlt, g.nome); }
+// Conserta mensagens salvas sem autor (bug antigo do histórico): se tem o nome, o autor sai de outra
+// mensagem da mesma pessoa.
+{
+  const idDoNome = new Map();
+  for (const g of mensagensGuardadas.values()) if (g.nome && g.key.participant && !g.key.fromMe) idDoNome.set(g.nome, g.key);
+  for (const g of mensagensGuardadas.values()) {
+    if (g.key.fromMe || g.key.participant || !idDoNome.has(g.nome)) continue;
+    const k = idDoNome.get(g.nome);
+    g.key.participant = k.participant;
+    if (k.participantAlt) g.key.participantAlt = k.participantAlt;
+  }
+}
 
 // Tira o rótulo "🤖 *Serviço: X*" (um ou vários) do começo do texto.
 const semRotulo = (t) => String(t || '').replace(/^(\s*🤖\s*\*?Servi[çc]o:[^*\n]*\*?\s*)+/u, '');
@@ -671,9 +687,13 @@ async function iniciar() {
 
     const respondeuBot = !!(ctx?.participant && meusIds().includes(jidNormalizedUser(ctx.participant)));
     // "Figurinha de cada imagem que mandei": de quem são as mídias (de quem foi respondido, se não for o bot).
+    // e o momento delas: respondendo a mensagem de alguém ("faz figurinha de tudo que ele mandou"), vale a
+    // hora DAQUELA mensagem; senão, a hora do próprio pedido.
+    const citadaSalva = ctx?.stanzaId ? mensagensGuardadas.get(ctx.stanzaId) : null;
     const donoDasMidias = ctx?.participant && !respondeuBot
-      ? [jidNormalizedUser(ctx.participant)]
+      ? [ctx.participant, citadaSalva?.key.participant, citadaSalva?.key.participantAlt].filter(Boolean).map(jidNormalizedUser)
       : [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
+    const momentoDasMidias = ctx?.participant && !respondeuBot && citadaSalva?.em ? { messageTimestamp: citadaSalva.em } : m;
 
     // 1) Só a pergunta ao Claude entra na fila (uma por vez).
     const decidir = async () => {
@@ -764,9 +784,9 @@ async function iniciar() {
         // Várias figurinhas: uma para CADA mídia que a pessoa mandou nos últimos minutos, cada uma
         // como um serviço próprio (responde a mídia de origem; se uma falhar, as outras saem).
         if (v.acao === 'responder' && v.figurinha?.fazer && v.figurinha.varias && v.figurinha.origem === 'imagem') {
-          const fontes = midiasRecentes(jid, donoDasMidias, m);
+          const fontes = midiasRecentes(jid, donoDasMidias, momentoDasMidias);
           if (!fontes.length) {
-            resposta = 'Não achei imagem, GIF ou vídeo seu dos últimos minutos para virar figurinha.';
+            resposta = 'Não achei imagem, GIF ou vídeo mandado nesse momento para virar figurinha.';
           } else {
             let feitas = 0;
             for (const g of fontes) {
