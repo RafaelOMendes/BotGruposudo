@@ -242,11 +242,21 @@ function salvarMensagens() {
 process.on('exit', salvarMensagens);
 function guardarMensagem(msg, nome) {
   if (!msg?.key?.id || !msg.message) return;
-  mensagensGuardadas.delete(msg.key.id); // reinsere no fim (mais recente)
-  mensagensGuardadas.set(msg.key.id, { key: { ...msg.key }, message: copiaDaMensagem(msg.message), nome: nome || '', em: numero(msg.messageTimestamp) || Math.floor(Date.now() / 1000) });
-  while (mensagensGuardadas.size > 1500) mensagensGuardadas.delete(mensagensGuardadas.keys().next().value);
-  timerSalvar ??= setTimeout(salvarMensagens, 5000); // junta várias mensagens numa gravação
+  const antes = mensagensGuardadas.get(msg.key.id);
+  mensagensGuardadas.set(msg.key.id, {
+    key: { ...msg.key },
+    message: copiaDaMensagem(msg.message),
+    nome: nome || antes?.nome || '',
+    em: numero(msg.messageTimestamp) || antes?.em || Math.floor(Date.now() / 1000),
+  });
+  // Cabe o histórico inteiro de um grupo; se passar, descarta as mais ANTIGAS (por horário).
+  if (mensagensGuardadas.size > MAX_MENSAGENS + 500) {
+    const ordem = [...mensagensGuardadas.entries()].sort((a, b) => (a[1].em || 0) - (b[1].em || 0));
+    for (const [id] of ordem.slice(0, mensagensGuardadas.size - MAX_MENSAGENS)) mensagensGuardadas.delete(id);
+  }
+  timerSalvar ??= setTimeout(salvarMensagens, 10_000); // junta várias mensagens numa gravação
 }
+const MAX_MENSAGENS = 30_000;
 
 /**
  * Mídias (foto, álbum, GIF, vídeo, figurinha) que a pessoa mandou na última leva antes do pedido:
@@ -361,7 +371,10 @@ async function iniciar() {
     logger,
     browser: Browsers.windows('Bot do Gabreu'),
     markOnlineOnConnect: false,
-    syncFullHistory: false,
+    // Na conexão (QR), pede o histórico COMPLETO e aceita todos os tipos: as mensagens antigas dos grupos
+    // viram contexto e fio de respostas.
+    syncFullHistory: true,
+    shouldSyncHistoryMessage: () => true,
     msgRetryCounterCache,
     cachedGroupMetadata: async (jid) => groupCache.get(jid),
     getMessage: async (key) => enviadas.get(key.id),
@@ -378,6 +391,24 @@ async function iniciar() {
     }
     return meta;
   }
+  // ---------- histórico retroativo ----------
+  // O WhatsApp manda o histórico completo das conversas quando o aparelho é conectado (QR escaneado).
+  // Tudo o que vier de grupo é salvo junto com as mensagens recentes: vira contexto e fio de respostas.
+  // (Pedir lotes antigos sob demanda foi testado: o celular desta conta responde sempre vazio.)
+  let historicoRecebido = 0;
+  sock.ev.on('messaging-history.set', ({ messages = [], syncType, progress }) => {
+    let salvas = 0;
+    for (const msg of messages) {
+      if (!msg?.message || !isJidGroup(msg.key?.remoteJid || '')) continue;
+      guardarMensagem(msg, msg.pushName);
+      salvas++;
+    }
+    if (!salvas) return;
+    historicoRecebido += salvas;
+    log(`Histórico do WhatsApp (tipo ${syncType}${progress != null ? `, ${progress}%` : ''}): +${salvas} mensagens de grupo (total ${historicoRecebido}).`);
+    salvarMensagens();
+  });
+
   sock.ev.on('groups.update', (updates) => updates.forEach((u) => groupCache.del(u.id)));
   sock.ev.on('group-participants.update', (u) => groupCache.del(u.id));
 
@@ -512,7 +543,7 @@ async function iniciar() {
     ultimaChecagem = Date.now();
     const autor = m.pushName || digitos(autorId);
     try {
-      const { hist } = historicoPara(jid, '');
+      const { hist } = historicoPara(jid, '', m.key.id);
       const v = await falaramComOBot({ grupo: meta.subject, historico: hist, autor, mensagem: texto, botAcabouDeResponder: continuacao });
       log(`Sem @, ${autor}: "${texto.slice(0, 60)}" → ${v.para_o_bot ? 'é com o bot' : 'não é com o bot'} (${v.motivo})`);
       if (v.para_o_bot && !jaRespondidas.has(m.key.id)) await responderMarcacao(m, jid, meta);
@@ -587,7 +618,7 @@ async function iniciar() {
     }
     if (fio.length) log(`Marcação de ${autor}: puxei ${fio.length} mensagem(ns) do fio de respostas${imagens.length || animado ? ' (com imagem)' : ''}.`);
 
-    const { hist, leituraPedida } = historicoPara(jid, pedido);
+    const { hist, leituraPedida } = historicoPara(jid, pedido, m.key.id);
     log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${citada ? ` (respondendo ${citada.slice(0, 60)})` : ''}${imagens.length ? ` (+${imagens.length} imagem)` : ''}${leituraPedida ? ` (lendo ${hist.length} mensagens)` : ''}`);
 
     // Pessoas marcadas na mensagem (fora o bot): viram os IDs do remetente se a pessoa criar uma regra.
@@ -948,7 +979,7 @@ async function iniciar() {
           guardarEnviada(await sock.sendMessage(jid, { sticker: meme }, { quoted: m }));
         } else if (acao === 'ia' && ia) {
           await sock.sendPresenceUpdate('composing', jid).catch(() => {});
-          const hist = (historicos.get(jid) || []).slice(0, -1).slice(-CONFIG.mencao.historico);
+          const hist = historicoDoGrupo(jid, CONFIG.mencao.historico, m.key.id);
           const resposta = await respostaDeRegra({ grupo: meta.subject, historico: hist, autor, mensagem: texto, instrucao: arg, imagens });
           await sock.sendPresenceUpdate('paused', jid).catch(() => {});
           guardarEnviada(await sock.sendMessage(jid, { text: resposta }, { quoted: m }));
@@ -962,36 +993,48 @@ async function iniciar() {
     return true;
   }
 
-  // Histórico curto por grupo (só em memória), usado como contexto para o Claude.
-  const historicos = new Map();
-  const horaBrasil = () => new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
-  function registrar(jid, nome, texto, idAtual = null) {
-    if (!texto) return;
-    const lista = historicos.get(jid) || historicoSalvo(jid, idAtual);
-    lista.push(`[${horaBrasil()}] ${nome}: ${texto.replace(/\s+/g, ' ').slice(0, 500)}`);
-    while (lista.length > CONFIG.mencao.historicoLeitura + 1) lista.shift();
-    historicos.set(jid, lista);
+  // Contexto do grupo: sai das mensagens salvas (em disco, inclusive as antigas buscadas no celular),
+  // em ordem de horário. Aqui em memória ficam só as notas internas do bot (ex: prompt de imagem que falhou).
+  const notasInternas = new Map(); // grupo -> [{ em, nome, texto }]
+  function registrar(jid, nome, texto) {
+    if (!texto || !String(nome).startsWith('Bot (nota')) return; // o resto já está nas mensagens salvas
+    const lista = notasInternas.get(jid) || [];
+    lista.push({ em: Date.now() / 1000, nome, texto });
+    while (lista.length > 20) lista.shift();
+    notasInternas.set(jid, lista);
   }
 
-  // Depois de reiniciar, o histórico recente do grupo vem das mensagens salvas em disco.
-  function historicoSalvo(jid, idAtual) {
-    const hora = (s) => new Date(s * 1000).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
-    return [...mensagensGuardadas.values()]
-      .filter((g) => g.key.remoteJid === jid && g.key.id !== idAtual)
-      .map((g) => ({ g, texto: resumo(conteudo(g)) }))
-      .filter(({ texto }) => texto)
-      .slice(-CONFIG.mencao.historicoLeitura)
-      .map(({ g, texto }) => `[${hora(g.em || 0)}] ${g.key.fromMe ? 'Bot' : g.nome || 'alguém'}: ${texto.replace(/\s+/g, ' ').slice(0, 500)}`);
+  const dataHora = (s) => {
+    const d = new Date(s * 1000);
+    const dia = (x) => x.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const hora = d.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+    return dia(d) === dia(new Date()) ? hora : `${dia(d).slice(0, 5)} ${hora}`;
+  };
+
+  /** As últimas `quantas` mensagens do grupo (fora a `semId`), mais antigas primeiro. */
+  function historicoDoGrupo(jid, quantas, semId = null) {
+    const nomeDe = (g) => (g.key.fromMe ? 'Bot' : g.nome || conhecidos.get(jid)?.get(digitos(jidNormalizedUser(g.key.participant || ''))) || 'alguém');
+    const itens = [];
+    for (const g of mensagensGuardadas.values()) {
+      if (g.key.remoteJid !== jid || g.key.id === semId) continue;
+      const texto = resumo(conteudo(g));
+      if (texto) itens.push({ em: g.em || 0, nome: nomeDe(g), texto: semMeuArroba(texto) });
+    }
+    itens.push(...(notasInternas.get(jid) || []));
+    return itens
+      .sort((a, b) => a.em - b.em)
+      .slice(-quantas)
+      .map((x) => `[${dataHora(x.em)}] ${x.nome}: ${x.texto.replace(/\s+/g, ' ').slice(0, 500)}`);
   }
 
   // Pedidos do tipo "lê aí", "resume a conversa", "o que o fulano falou?" liberam o histórico longo.
   // (testado no texto sem acentos, porque o \b do regex não entende letra acentuada)
   const PEDE_LEITURA = /\b(le|ler|leia|leu|resum\w*|o que (o|a)?\s*\w*\s*(falou|disse|mandou|quis dizer)|que (ele|ela|eles|elas) (falou|disse|falaram|disseram)|conversa|historico|mensagens? (de )?(cima|antes|anterior\w*)|la em cima|acima|contexto|do que (voces|vcs|eles|elas) (estao|tao) falando)\b/i;
 
-  function historicoPara(jid, pedido) {
-    const tudo = (historicos.get(jid) || []).slice(0, -1); // a própria mensagem vai separada
+  function historicoPara(jid, pedido, idAtual = null) {
     const leituraPedida = PEDE_LEITURA.test(normalizar(pedido));
-    return { hist: leituraPedida ? tudo : tudo.slice(-CONFIG.mencao.historico), leituraPedida };
+    // a própria mensagem vai separada
+    return { hist: historicoDoGrupo(jid, leituraPedida ? CONFIG.mencao.historicoLeitura : CONFIG.mencao.historico, idAtual), leituraPedida };
   }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
