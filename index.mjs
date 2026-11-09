@@ -33,7 +33,8 @@ import makeWASocket, {
 import { acharArea, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
-import { aplicarEfeitos, camadaDeTexto, cortarArea, catalogoParaPrompt, filtroFfmpeg, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
+import { contornar } from './contorno.mjs';
+import { aplicarEfeitos, camadaDeTexto, catalogoParaPrompt, filtroFfmpeg, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { gerarPdf } from './pdf.mjs';
@@ -978,12 +979,14 @@ async function iniciar() {
     return `🤖 *Serviço: ${nome}*${corpo ? `\n${corpo}` : ''}`;
   }
 
-  // Recorte "parte": acha o alvo na foto (Sonnet com grade) e corta só ele.
+  // Recorte "parte": acha o alvo na foto (Sonnet com grade) e recorta pelo contorno dele
+  // (MobileSAM + BiRefNet, local). "sem_fundo": só tira o fundo da imagem toda.
   async function recortarSePedido(buffer, f) {
+    if (f.recorte === 'sem_fundo') return contornar(buffer);
     if (f.recorte !== 'parte' || !f.alvo) return buffer;
     const area = await acharArea(buffer, f.alvo);
     log(`Recorte de "${f.alvo}": ${area.motivo} (x ${(area.x * 100).toFixed(0)}%, y ${(area.y * 100).toFixed(0)}%, ${(area.w * 100).toFixed(0)}x${(area.h * 100).toFixed(0)}%).`);
-    return cortarArea(buffer, area);
+    return contornar(buffer, area);
   }
 
   async function montarFigurinha(f, imagens, animado = null) {

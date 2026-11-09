@@ -315,7 +315,7 @@ const SCHEMA_MENCAO = {
         texto: { type: 'string', description: 'origem texto: o texto da figurinha' },
         prompt: { type: 'string', description: 'origem gerada: descrição da imagem, em inglês e detalhada' },
         cor: { type: 'string', enum: ['branco', 'preto', 'amarelo', 'vermelho', 'azul', 'verde', 'rosa', 'roxo', 'laranja'] },
-        recorte: { type: 'string', enum: ['inteira', 'quadrado', 'parte'], description: 'parte = recortar só uma pessoa/coisa da imagem (descrita em "alvo")' },
+        recorte: { type: 'string', enum: ['inteira', 'quadrado', 'parte', 'sem_fundo'], description: 'parte = recortar só uma pessoa/coisa da imagem pelo contorno (descrita em "alvo"); sem_fundo = tirar o fundo da imagem toda' },
         alvo: { type: 'string', description: 'recorte parte: o que recortar, bem específico (ex: "a terceira pessoa da esquerda para a direita", "o cara de boné azul", "o cachorro"); senão ""' },
         efeitos: { type: 'array', description: 'filtros aplicados na imagem (origem imagem/web), na ordem; [] se nenhum', items: { type: 'string', enum: ['inverter_cores', 'preto_e_branco', 'sepia', 'espelhar', 'virar_de_cabeca_pra_baixo', 'girar_90', 'desfocar', 'pixelar', 'saturar', 'brilho_alto', 'escurecer'] } },
         varias: { type: 'boolean', description: 'true = uma figurinha para CADA imagem/GIF/vídeo que a pessoa mandou nos últimos minutos ("de cada imagem", "de todas", "dessas")' },
@@ -391,7 +391,10 @@ ${TOM_MEME.replace(/^/gm, '    ')}
   e descreva em "alvo" exatamente o que recortar, de um jeito que dê para achar na foto (posição contando
   da esquerda para a direita, roupa, cabelo, o que está fazendo). Se pedirem pelo NOME e você não souber
   quem é na foto, pergunte qual é (ex: "qual deles é o Nicolas, o de preto?"). O bot recorta DE VERDADE:
-  nunca diga que não consegue recortar, e não use a IA de imagem para isso.
+  nunca diga que não consegue recortar, e não use a IA de imagem para isso. O recorte segue o CONTORNO
+  da pessoa/coisa (fundo transparente), não é um retângulo.
+  TIRAR O FUNDO: "tira o fundo", "sem fundo", "só a pessoa" (numa foto de uma pessoa só) → recorte
+  "sem_fundo" (alvo ""): o bot tira o fundo e deixa só o assunto principal.
   O "texto" da resposta vira a legenda curta do serviço (ex: "figurinha do Nicolas feita"). Se não for
   figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira", "alvo": "", "efeitos": []).
   VÁRIAS: se pedirem figurinha de várias mídias ("de cada imagem que mandei", "de todas", "dessas fotos",
