@@ -28,7 +28,7 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { avaliarEntregas, avaliarNonsense, configurarModelos, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
 import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
@@ -422,6 +422,34 @@ async function iniciar() {
 
   const ultimaMencao = new Map(); // autor -> timestamp
 
+  // ---------- falaram com o bot sem marcar ("bot o que tem hoje?", continuação da conversa) ----------
+  const ultimaRespostaBot = new Map(); // grupo -> { autorId, em, n } (quem o bot respondeu por último)
+  const contadorMsgs = new Map(); // grupo -> nº de mensagens de gente vistas
+  let ultimaChecagem = 0;
+
+  /** Só chama o Claude para mensagens candidatas; ele só responde se for MUITO claro que é com ele. */
+  async function talvezFalaramComigo(m, jid, meta) {
+    const texto = textoDa(m).trim();
+    if (!texto || texto.length > 500) return;
+    const autorId = jidNormalizedUser(m.key.participant || jid);
+    const r = ultimaRespostaBot.get(jid);
+    // Continuação: o bot respondeu essa pessoa há menos de 3 min e no máximo 2 mensagens de outros no meio.
+    const continuacao = !!r && r.autorId === autorId && Date.now() - r.em < 3 * 60e3 && (contadorMsgs.get(jid) || 0) - r.n <= 3;
+    const chamaBot = /\bbot\b/.test(normalizar(texto));
+    if (!continuacao && !chamaBot) return;
+    if (Date.now() - ultimaChecagem < 3000) return; // rajada de mensagens: não checa todas
+    ultimaChecagem = Date.now();
+    const autor = m.pushName || digitos(autorId);
+    try {
+      const { hist } = historicoPara(jid, '');
+      const v = await falaramComOBot({ grupo: meta.subject, historico: hist, autor, mensagem: texto, botAcabouDeResponder: continuacao });
+      log(`Sem @, ${autor}: "${texto.slice(0, 60)}" → ${v.para_o_bot ? 'é com o bot' : 'não é com o bot'} (${v.motivo})`);
+      if (v.para_o_bot && !jaRespondidas.has(m.key.id)) await responderMarcacao(m, jid, meta);
+    } catch (e) {
+      log(`Não deu para ver se falaram com o bot (${e.message}).`);
+    }
+  }
+
   async function responderMarcacao(m, jid, meta) {
     const autorId = m.key.participant || jid;
     const autor = m.pushName || digitos(autorId);
@@ -619,6 +647,7 @@ async function iniciar() {
       }
       if (figurinhaPronta) guardarEnviada(await sock.sendMessage(jid, { sticker: figurinhaPronta }, { quoted: m }));
       registrar(jid, 'Bot', resposta || '[anexo]');
+      ultimaRespostaBot.set(jid, { autorId: jidNormalizedUser(autorId), em: Date.now(), n: contadorMsgs.get(jid) || 0 });
       log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}${figurinhaPronta ? ' + figurinha' : ''}`);
     };
     const decisao = filaClaude.then(decidir);
@@ -813,6 +842,7 @@ async function iniciar() {
         if (!isJidGroup(jid)) continue;
         registrar(jid, m.key.fromMe ? 'Bot' : m.pushName || digitos(m.key.participant || ''), resumo(conteudo(m)));
         lembrarPessoa(jid, m);
+        if (!m.key.fromMe && resumo(conteudo(m))) contadorMsgs.set(jid, (contadorMsgs.get(jid) || 0) + 1);
         if (m.key.fromMe || jaRespondidas.has(m.key.id)) continue;
 
         const idade = Date.now() / 1000 - Number(m.messageTimestamp || 0);
@@ -824,6 +854,8 @@ async function iniciar() {
           await responderMarcacao(m, jid, meta);
           continue;
         }
+        // Sem @: em segundo plano, vê se foi claramente com o bot (não segura as outras mensagens).
+        if (CONFIG.mencao.ativo && ia) talvezFalaramComigo(m, jid, meta);
 
         if (baixarLinks(m, jid)) continue;
         if (await aplicarRegras(m, jid, meta)) continue;
@@ -833,6 +865,30 @@ async function iniciar() {
         await responderFigurinha(m, jid);
       } catch (err) {
         log('Erro ao processar mensagem:', err.stack || err);
+      }
+    }
+  });
+
+  // Mensagem editada que passou a marcar o bot: responde, se ainda não respondeu (nem está respondendo).
+  sock.ev.on('messages.update', async (updates) => {
+    for (const { key, update } of updates) {
+      try {
+        const editada = update?.message?.editedMessage?.message;
+        if (!editada || key.fromMe || !isJidGroup(key.remoteJid) || !CONFIG.mencao.ativo || !ia) continue;
+        const jid = key.remoteJid;
+        const autorId = jidNormalizedUser(key.participant || '');
+        const nome = conhecidos.get(jid)?.get(digitos(autorId));
+        const m = { key, message: editada, pushName: nome, messageTimestamp: update.messageTimestamp || Date.now() / 1000 };
+        if (!meMarcaram(m)) continue;
+        if (jaRespondidas.has(key.id)) {
+          log(`${nome || 'alguém'} editou uma mensagem que marca o bot, mas ela já foi (ou está sendo) respondida.`);
+          continue;
+        }
+        log(`${nome || 'alguém'} editou uma mensagem para marcar o bot: "${textoDa(m).slice(0, 80)}"`);
+        registrar(jid, nome || digitos(autorId), resumo(conteudo(m)));
+        await responderMarcacao(m, jid, await metadadosGrupo(jid));
+      } catch (err) {
+        log('Erro ao processar mensagem editada:', err.stack || err);
       }
     }
   });

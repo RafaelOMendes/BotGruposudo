@@ -225,6 +225,52 @@ export async function avaliarNonsense(buffer, { autor, tipo, catalogo }) {
   return v;
 }
 
+// ---------- falaram com o bot sem marcar? ----------
+const SCHEMA_DIRECIONADA = {
+  type: 'object',
+  properties: {
+    para_o_bot: { type: 'boolean' },
+    motivo: { type: 'string' },
+  },
+  required: ['para_o_bot', 'motivo'],
+  additionalProperties: false,
+};
+
+const SISTEMA_DIRECIONADA = `Você decide se uma mensagem de um grupo de amigos do WhatsApp foi dirigida AO BOT do grupo
+(o "Bot do Gabreu"), mesmo sem marcar (@) nem usar "responder". O bot NÃO deve poluir o grupo: só diga
+para_o_bot = true quando for MUITO claro que a pessoa está falando COM o bot e espera uma resposta dele.
+
+Diga true quando:
+- a pessoa chama o bot e pede/pergunta algo a ele: "bot o que vai ter hoje", "bot, faz uma figurinha disso",
+  "e aí bot, quanto vale a prova?", "bot me explica isso";
+- o bot acabou de responder essa mesma pessoa e a mensagem é claramente a continuação da conversa com
+  ele (uma pergunta de volta, "e amanhã?", "manda de novo", "faz em pdf", "tá errado, é a de IA"), e faz
+  sentido o bot responder.
+
+Diga false quando:
+- falam SOBRE o bot, para os outros: "esse bot faz isso", "esse bot é muito bom", "o bot travou kkk",
+  "vou pedir pro bot", "o bot do Rafa é brabo";
+- a mensagem é para outra pessoa do grupo, ou é conversa geral, risada, reação, comentário solto;
+- "bot" aparece com outro sentido (ex: "bot" de jogo, "robô");
+- depois do bot, a pessoa só agradece ou reage ("valeu", "kkkk", "top") sem pedir nada;
+- na dúvida. Na dúvida é SEMPRE false.
+
+"motivo": uma frase curta.`;
+
+/** true só se a mensagem (sem @) foi claramente dirigida ao bot e pede resposta. */
+export async function falaramComOBot({ grupo, historico, autor, mensagem, botAcabouDeResponder }) {
+  const texto = [
+    `Grupo: "${grupo}".`,
+    historico.length ? `Últimas mensagens (mais antigas primeiro):\n${historico.join('\n')}` : '',
+    botAcabouDeResponder ? `O bot acabou de responder ${autor}, e esta é a mensagem seguinte de ${autor}.` : '',
+    `Mensagem de ${autor} para decidir:\n${mensagem}`,
+  ].filter(Boolean).join('\n\n');
+  const r = await perguntar({ sistema: SISTEMA_DIRECIONADA, conteudo: [{ type: 'text', text: texto }], schema: SCHEMA_DIRECIONADA, tarefa: 'figurinha', timeoutMs: 60_000 });
+  const v = r.structured_output;
+  if (typeof v?.para_o_bot !== 'boolean') throw new Error('resposta sem o formato esperado');
+  return v;
+}
+
 // ---------- marcação (@): responder, criar ou apagar regra ----------
 export const TIPOS_MENSAGEM = ['texto', 'figurinha', 'imagem', 'audio', 'video', 'qualquer'];
 export const TIPOS_ACAO = ['texto', 'ia', 'meme', 'figurinha_padrao', 'audio_gabreu'];
