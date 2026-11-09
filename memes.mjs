@@ -20,10 +20,31 @@ export async function templates() {
   return lista;
 }
 
-/** Texto curto para o prompt: "id | nome" por linha. */
+// Onde vai o texto nos templates com painéis/balões (frações da imagem: x, y, largura, altura).
+// O resto usa o clássico: cima no topo, baixo no rodapé.
+const DIREITA = { cima: [0.5, 0, 0.5, 0.5], baixo: [0.5, 0.5, 0.5, 0.5], dica: 'cima = painel de cima (rejeita), baixo = painel de baixo (prefere)' };
+const LAYOUTS = {
+  181913649: DIREITA, // Drake
+  91998305: DIREITA, // Drake Blank
+  178591752: { cima: [0.5, 0, 0.5, 0.53], baixo: [0.5, 0.53, 0.5, 0.47], dica: 'cima = coisa comum, baixo = versão chique' },
+  129315248: { cima: [0.4, 0.03, 0.57, 0.44], baixo: [0.4, 0.52, 0.57, 0.44], dica: 'cima = o "não", baixo = o "sim"' },
+  99683372: { cima: [0, 0, 0.5, 0.5], baixo: [0, 0.5, 0.5, 0.5], dica: 'cima = o que dá sono, baixo = o que acorda' },
+  188390779: { cima: [0, 0, 0.5, 0.27], baixo: [0.5, 0, 0.5, 0.27], dica: 'cima = fala da mulher gritando, baixo = resposta do gato' },
+  217743513: { cima: [0.07, 0.2, 0.35, 0.28], baixo: [0.5, 0, 0.5, 0.2], dica: 'cima = o que está na carta (a alternativa), baixo = o cara que prefere comprar 25' },
+  129242436: { cima: [0.42, 0.6, 0.45, 0.22], baixo: [0, 0, 1, 0.2], dica: 'cima = frase da placa, baixo = legenda no topo (opcional)' },
+  252600902: { cima: [0, 0, 0.5, 0.22], baixo: [0.45, 0, 0.55, 0.15], dica: 'cima = "espera, é tudo X?", baixo = "sempre foi"' },
+  438680: { cima: [0.02, 0.02, 0.45, 0.22], baixo: [0.52, 0.02, 0.46, 0.22], dica: 'cima = balão do Robin, baixo = balão do Batman (o tapa)' },
+  110133729: { cima: [0, 0, 0.5, 0.3], baixo: [0.5, 0, 0.5, 0.3], dica: 'cima = homem-aranha da esquerda, baixo = o da direita' },
+  67452763: { cima: [0, 0, 0.5, 0.4], baixo: [0.5, 0, 0.5, 0.4], dica: 'cima = Lula Molusco sozinho, baixo = a diversão lá fora' },
+  354700819: { cima: [0, 0.05, 0.42, 0.38], baixo: [0.55, 0.05, 0.45, 0.35], dica: 'cima = janela do triste, baixo = janela do feliz' },
+  148909805: { cima: [0, 0, 1, 0.4], baixo: null, dica: 'cima = a situação; baixo vazio' },
+  221578498: { cima: [0.06, 0.18, 0.36, 0.33], baixo: [0.5, 0.48, 0.5, 0.2], dica: 'cima = no túmulo (o que morreu), baixo = quem está feliz' },
+};
+
+/** Texto curto para o prompt: "id | nome" por linha (e onde vai o texto, quando não é o clássico). */
 export async function catalogoParaPrompt() {
   try {
-    return (await templates()).map((t) => `${t.id} | ${t.nome}`).join('\n');
+    return (await templates()).map((t) => `${t.id} | ${t.nome}${LAYOUTS[t.id] ? ` (${LAYOUTS[t.id].dica})` : ''}`).join('\n');
   } catch {
     return '';
   }
@@ -32,11 +53,11 @@ export async function catalogoParaPrompt() {
 const escapar = (s) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-// Quebra o texto em até 3 linhas e escolhe uma fonte que caiba na largura.
-function diagramar(texto, largura, alturaMax) {
+// Quebra o texto em até `maxLinhas` linhas e escolhe a maior fonte que caiba na caixa.
+function diagramar(texto, largura, alturaMax, maxLinhas = 3) {
   const palavras = texto.toUpperCase().trim().split(/\s+/).filter(Boolean);
   if (!palavras.length) return null;
-  for (let fonte = Math.round(largura / 10); fonte >= 16; fonte -= 2) {
+  for (let fonte = Math.round(Math.min(largura / 5, alturaMax / 2, 64)); fonte >= 16; fonte -= 2) {
     const porLinha = Math.max(4, Math.floor(largura / (fonte * 0.62)));
     const linhas = [];
     let atual = '';
@@ -47,20 +68,24 @@ function diagramar(texto, largura, alturaMax) {
     }
     if (atual) linhas.push(atual);
     const cabe = linhas.length * fonte * 1.1 <= alturaMax;
-    if (linhas.length <= 3 && linhas.every((l) => l.length <= porLinha) && cabe) return { fonte, linhas };
+    if (linhas.length <= maxLinhas && linhas.every((l) => l.length <= porLinha) && cabe) return { fonte, linhas };
   }
   return { fonte: 14, linhas: [palavras.join(' ').slice(0, 70)] };
 }
 
-function blocoTexto(texto, largura, alturaMax, y0, deBaixo) {
-  const d = diagramar(texto || '', largura, alturaMax);
+/** Texto dentro da caixa (x, y, w, h em px), alinhado no topo, no meio ou na base. */
+function blocoTexto(texto, { x, y, w, h }, alinhar = 'meio') {
+  const pad = Math.max(4, Math.round(w * 0.04));
+  const d = diagramar(texto || '', w - 2 * pad, h - 2 * pad, alinhar === 'meio' ? 5 : 3);
   if (!d) return '';
   const altura = d.fonte * 1.1;
-  const inicio = deBaixo ? y0 - altura * (d.linhas.length - 1) : y0 + d.fonte * 0.9;
+  const total = altura * (d.linhas.length - 1) + d.fonte * 0.9;
+  const topo = alinhar === 'topo' ? y + pad : alinhar === 'base' ? y + h - pad - total : y + (h - total) / 2;
+  const inicio = topo + d.fonte * 0.9;
   return d.linhas
     .map(
       (l, i) =>
-        `<text x="${largura / 2}" y="${inicio + i * altura}" font-size="${d.fonte}" text-anchor="middle"` +
+        `<text x="${x + w / 2}" y="${inicio + i * altura}" font-size="${d.fonte}" text-anchor="middle"` +
         ` font-family="Impact, 'Arial Black', Arial, sans-serif" font-weight="bold" fill="#fff"` +
         ` stroke="#000" stroke-width="${Math.max(2, d.fonte / 12)}" paint-order="stroke">${escapar(l)}</text>`
     )
@@ -81,26 +106,24 @@ export async function figurinhaDeMeme({ id, cima = '', baixo = '' }) {
   if (!r.ok) throw new Error(`não baixou o template (${r.status})`);
   const original = Buffer.from(await r.arrayBuffer());
 
-  return figurinhaDeImagem(original, { cima, baixo, recorte: 'inteira' });
+  return figurinhaDeImagem(original, { cima, baixo, recorte: 'inteira', layout: LAYOUTS[t.id] });
 }
 
 /**
  * Figurinha a partir de uma imagem qualquer (mandada no grupo, achada na web...), com texto
  * opcional em cima/embaixo. recorte "quadrado" corta o centro; "inteira" mantém a imagem toda.
  */
-export async function figurinhaDeImagem(buffer, { cima = '', baixo = '', recorte = 'inteira' } = {}) {
+export async function figurinhaDeImagem(buffer, { cima = '', baixo = '', recorte = 'inteira', layout = null } = {}) {
   const base = await sharp(buffer, { animated: false })
     .resize(512, 512, recorte === 'quadrado' ? { fit: 'cover', position: 'centre' } : { fit: 'inside' })
     .png()
     .toBuffer();
   const { width: w, height: h } = await sharp(base).metadata();
-  const margem = Math.round(h * 0.03);
-  const svg = Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
-      blocoTexto(cima, w, h * 0.4, margem, false) +
-      blocoTexto(baixo, w, h * 0.4, h - margem - 4, true) +
-      '</svg>'
-  );
+  const caixa = (f) => ({ x: f[0] * w, y: f[1] * h, w: f[2] * w, h: f[3] * h });
+  const textos = layout
+    ? [layout.cima ? blocoTexto(cima, caixa(layout.cima)) : '', layout.baixo ? blocoTexto(baixo, caixa(layout.baixo)) : '']
+    : [blocoTexto(cima, { x: 0, y: 0, w, h: h * 0.4 }, 'topo'), blocoTexto(baixo, { x: 0, y: h * 0.6, w, h: h * 0.4 }, 'base')];
+  const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">${textos.join('')}</svg>`);
   const comTexto = await sharp(base).composite([{ input: svg }]).png().toBuffer();
   return sharp(comTexto)
     .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
