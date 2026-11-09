@@ -469,6 +469,8 @@ async function iniciar() {
   }
 
   const ultimaMencao = new Map(); // autor -> timestamp
+  // "@<número do bot>" dentro de mensagens citadas vira "@bot (você)", para o Claude saber que é ele.
+  const semMeuArroba = (t) => meusIds().reduce((s, id) => s.split('@' + digitos(id)).join('@bot (você)'), t || '');
 
   // ---------- falaram com o bot sem marcar ("bot o que tem hoje?", continuação da conversa) ----------
   const ultimaRespostaBot = new Map(); // grupo -> { autorId, em, n } (quem o bot respondeu por último)
@@ -531,7 +533,7 @@ async function iniciar() {
     if (ctx?.quotedMessage) {
       const q = ctx.quotedMessage;
       const quemCitado = ctx.participant && meusIds().includes(jidNormalizedUser(ctx.participant)) ? 'você (o bot)' : 'alguém do grupo';
-      citada = `${quemCitado}: ${resumo(q) || '[mensagem]'}`;
+      citada = `${quemCitado}: ${semMeuArroba(resumo(q)) || '[mensagem]'}`;
       try {
         await pegarMidia(q, { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: q });
       } catch (e) {
@@ -555,7 +557,7 @@ async function iniciar() {
       if (nivel > 0 || !ctx?.stanzaId) {
         if (!guardada) break; // o fio sai do que o bot viu desde que ligou
         const quem = guardada.key.fromMe ? 'você (o bot)' : guardada.nome || 'alguém';
-        fio.unshift(`${quem}: ${resumo(conteudo(guardada)) || '[mensagem]'}`);
+        fio.unshift(`${quem}: ${semMeuArroba(resumo(conteudo(guardada))) || '[mensagem]'}`);
         if (!imagens.length && !animado) {
           try { await pegarMidia(conteudo(guardada), guardada); } catch (e) { log('Não deu para baixar a mídia do fio:', e.message); }
         }
