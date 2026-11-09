@@ -168,7 +168,7 @@ const EXTRAIR = /\.(pdf|docx|pptx|xlsx|odt|odp|ods|rtf)$/i;
 const TEXTO_PURO = /^text\/|\/(json|csv|xml)$/;
 
 const nomeSeguro = (s) => String(s || 'sem nome').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 90) || 'sem nome';
-const dataBR = (iso) => (iso ? new Date(iso).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '');
+const dataHoraBR = (iso) => (iso ? new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '');
 
 function listarMateriais(materiais = []) {
   return materiais.map((m) => {
@@ -202,7 +202,7 @@ async function textoDoArquivo(meta, token) {
  * aviso, atividade e material (data, tema, texto, anexos) e um .txt por arquivo do Drive anexado.
  * Só baixa de novo o arquivo que mudou. Devolve um resumo.
  */
-export async function sincronizarMateriais(cfg, { log = console.log } = {}) {
+export async function sincronizarMateriais(cfg, { log = console.log, rapido = false } = {}) {
   const token = await tokenDeAcesso(cfg);
   fs.mkdirSync(PASTA_MATERIAIS, { recursive: true });
   let estado = {};
@@ -227,12 +227,12 @@ export async function sincronizarMateriais(cfg, { log = console.log } = {}) {
     ]);
     const tema = Object.fromEntries(topicos.map((t) => [t.topicId, t.name]));
     const posts = [
-      ...avisos.map((a) => ({ tipo: 'Aviso', data: a.creationTime, texto: a.text, materials: a.materials })),
+      ...avisos.map((a) => ({ tipo: 'Aviso', id: a.id, link: a.alternateLink, data: a.creationTime, editado: a.updateTime, texto: a.text, materials: a.materials })),
       ...atividades.map((w) => ({
-        tipo: 'Atividade', data: w.creationTime, titulo: w.title, texto: w.description, materials: w.materials, topicId: w.topicId,
+        tipo: 'Atividade', id: w.id, link: w.alternateLink, data: w.creationTime, editado: w.updateTime, titulo: w.title, texto: w.description, materials: w.materials, topicId: w.topicId,
         extra: [w.dueDate ? `prazo: ${w.dueDate.day}/${w.dueDate.month}/${w.dueDate.year}` : '', w.maxPoints != null ? `vale ${w.maxPoints} pontos` : ''].filter(Boolean).join(', '),
       })),
-      ...materiais.map((m) => ({ tipo: 'Material', data: m.creationTime, titulo: m.title, texto: m.description, materials: m.materials, topicId: m.topicId })),
+      ...materiais.map((m) => ({ tipo: 'Material', id: m.id, link: m.alternateLink, data: m.creationTime, editado: m.updateTime, titulo: m.title, texto: m.description, materials: m.materials, topicId: m.topicId })),
     ].sort((a, b) => String(b.data).localeCompare(String(a.data)));
 
     const mural = [
@@ -240,7 +240,8 @@ export async function sincronizarMateriais(cfg, { log = console.log } = {}) {
       [c.descriptionHeading, c.description, c.room ? `Sala: ${c.room}` : ''].filter(Boolean).join('\n'),
       `Temas: ${topicos.map((t) => t.name).join(' | ') || '(nenhum)'}`,
       ...posts.map((p) => [
-        `## ${p.tipo}${p.titulo ? `: ${p.titulo}` : ''} (postado em ${dataBR(p.data)}${p.topicId && tema[p.topicId] ? `, tema: ${tema[p.topicId]}` : ''}${p.extra ? `, ${p.extra}` : ''})`,
+        `## ${p.tipo}${p.titulo ? `: ${p.titulo}` : ''} (postado em ${dataHoraBR(p.data)}${p.editado && p.editado.slice(0, 16) !== String(p.data).slice(0, 16) ? `, editado em ${dataHoraBR(p.editado)}` : ''}${p.topicId && tema[p.topicId] ? `, tema: ${tema[p.topicId]}` : ''}${p.extra ? `, ${p.extra}` : ''})`,
+        `id do post: ${p.id}${p.link ? ` | link: ${p.link}` : ''}`,
         p.texto || '',
         p.materials?.length ? `Anexos:\n${listarMateriais(p.materials)}` : '',
       ].filter(Boolean).join('\n')),
@@ -253,6 +254,13 @@ export async function sincronizarMateriais(cfg, { log = console.log } = {}) {
     for (const [id, titulo] of ids) {
       try {
         const antes = estado.arquivos?.[id];
+        // Rápida (na hora da pergunta): arquivo já conhecido não é conferido; só baixa anexo novo.
+        // A completa, de 6 em 6 h, pega arquivo editado.
+        if (rapido && antes && (antes.pulado || fs.existsSync(path.join(PASTA_MATERIAIS, antes.caminho)))) {
+          novoEstado.arquivos[id] = antes;
+          if (!antes.pulado) arquivosDaTurma.push(path.basename(antes.caminho));
+          continue;
+        }
         const meta = await get(`${DRIVE}/${id}?fields=id,name,mimeType,modifiedTime,size&supportsAllDrives=true`, token);
         if (antes?.pulado && antes.modificado === meta.modifiedTime) { novoEstado.arquivos[id] = antes; continue; } // imagem, zip...
         if (antes && antes.modificado === meta.modifiedTime && fs.existsSync(path.join(PASTA_MATERIAIS, antes.caminho))) {
@@ -269,6 +277,8 @@ export async function sincronizarMateriais(cfg, { log = console.log } = {}) {
         arquivosDaTurma.push(nome);
         baixados++;
       } catch (e) {
+        // Fica marcado: a busca rápida não tenta (nem avisa) de novo; a completa tenta.
+        novoEstado.arquivos[id] = { modificado: '', pulado: e.message };
         log(`Classroom: ${c.name}: não deu para ler "${titulo}" (${e.message}).`);
       }
     }
@@ -284,13 +294,16 @@ export function indiceMateriais() {
   try { return fs.readFileSync(path.join(PASTA_MATERIAIS, '_indice.md'), 'utf8'); } catch { return ''; }
 }
 
-/** Sincroniza ao ligar e a cada `intervaloH` horas. Devolve a função para sincronizar na hora. */
+/**
+ * Sincroniza (completa) ao ligar e a cada `intervaloH` horas. Devolve sincronizar({ rapido }) para
+ * buscar na hora: a rápida relê os murais e baixa só anexo novo (é a usada quando perguntam).
+ */
 export function manterMateriais(cfg, { log = console.log, intervaloH = 6 } = {}) {
   let emAndamento = null;
-  const sincronizar = () => {
+  const sincronizar = ({ rapido = false } = {}) => {
     if (!classroomConectado()) return Promise.resolve(null);
-    emAndamento ??= sincronizarMateriais(cfg, { log })
-      .then((r) => { log(`Classroom: materiais sincronizados (${r.turmas} turma(s), ${r.arquivos} arquivo(s), ${r.baixados} novo(s)).`); return r; })
+    emAndamento ??= sincronizarMateriais(cfg, { log, rapido })
+      .then((r) => { log(`Classroom: materiais sincronizados${rapido ? ' (rápida, na hora da pergunta)' : ''} (${r.turmas} turma(s), ${r.arquivos} arquivo(s), ${r.baixados} novo(s)).`); return r; })
       .catch((e) => { log(`Classroom: não deu para sincronizar os materiais (${e.message}).`); return null; })
       .finally(() => { emAndamento = null; });
     return emAndamento;
@@ -353,4 +366,14 @@ if (direto && process.argv.includes('--login')) {
     .then(() => sincronizarMateriais(cfg))
     .then((r) => console.log(`Materiais: ${r.turmas} turma(s), ${r.arquivos} arquivo(s) em ${PASTA_MATERIAIS}.`))
     .catch((e) => { console.error('Erro:', e.message); process.exit(1); });
+}
+
+/**
+ * Link do Classroom (classroom.google.com/c/<turma>/m|a|p|sa/<post>) → ids numéricos.
+ * Os pedaços do link são os ids em base64.
+ */
+export function idsDeLinkClassroom(texto) {
+  const dec = (b) => { const t = Buffer.from(b, 'base64').toString('utf8'); return /^\d+$/.test(t) ? t : b; };
+  return [...String(texto || '').matchAll(/classroom\.google\.com\/(?:u\/\d+\/)?c\/([A-Za-z0-9_-]+)(?:\/(?:m|a|p|sa)\/([A-Za-z0-9_-]+))?/g)]
+    .map((m) => ({ turma: dec(m[1]), post: m[2] ? dec(m[2]) : '' }));
 }

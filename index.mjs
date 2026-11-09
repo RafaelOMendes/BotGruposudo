@@ -30,9 +30,9 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { acharArea, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { acharArea, agoraBrasil, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
-import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
+import { vigiarLogin, manterMateriais, indiceMateriais, idsDeLinkClassroom, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
 import { contornar } from './contorno.mjs';
 import { aplicarEfeitos, camadaDeTexto, catalogoParaPrompt, filtroFfmpeg, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
@@ -734,11 +734,23 @@ async function iniciar() {
       }
       // Pergunta sobre as aulas/matérias → o Claude vasculha os materiais do Classroom.
       let materiais = null;
-      if (sincronizarMateriais && (PERGUNTA_AULA.test(`${pedido} ${citada}`) || entregas)) {
-        if (!indiceMateriais()) await sincronizarMateriais();
+      // Também conta o fio: "foi de programação paralela, pesquisa aí" continua uma conversa sobre o class.
+      const linksClass = idsDeLinkClassroom(`${pedido} ${citada} ${fio.join(' ')}`);
+      if (sincronizarMateriais && (PERGUNTA_AULA.test(`${pedido} ${citada} ${fio.join(' ')}`) || entregas || linksClass.length)) {
+        // Antes de responder, busca no Classroom para a cópia local ficar em dia (o que o professor
+        // acabou de postar). Rápida: só os murais e anexos novos; se demorar, usa a cópia que tem.
+        let atualizado = '';
+        const t0 = Date.now();
+        const r = await Promise.race([
+          sincronizarMateriais({ rapido: true }),
+          new Promise((ok) => setTimeout(() => ok('demorou'), 60_000)),
+        ]);
+        if (r && r !== 'demorou') atualizado = agoraBrasil();
+        log(`Classroom: busca na hora da pergunta ${r === 'demorou' ? 'demorou; usando a cópia que já tinha' : r ? `ok em ${((Date.now() - t0) / 1000).toFixed(0)} s` : 'falhou; usando a cópia que já tinha'}.`);
         const indice = indiceMateriais();
         if (indice) {
-          materiais = { indice, pasta: PASTA_MATERIAIS };
+          const links = linksClass.map((l) => `O link do Classroom na mensagem é da turma id ${l.turma}${l.post ? `, post id ${l.post}: procure "id do post: ${l.post}" nos _mural.md (Grep) e responda sobre ESSE post` : ''}.`).join('\n');
+          materiais = { indice, pasta: PASTA_MATERIAIS, atualizado, links };
           log('Marcação sobre aulas: o Claude vai procurar nos materiais do Classroom.');
         }
       }

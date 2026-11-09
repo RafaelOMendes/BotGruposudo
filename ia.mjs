@@ -505,10 +505,12 @@ export async function interpretarMencao({ grupo, historico, autor, pedido, citad
   if (materiais) {
     partes.push(`MATERIAIS DO GOOGLE CLASSROOM DO RAFA (baixados em texto na pasta atual; você PODE e DEVE ler com
 Glob, Grep e Read, é a exceção à regra de não acessar arquivos). Cada turma é uma pasta com:
-- _mural.md: todos os avisos, atividades e materiais postados (data, tema, texto, anexos e links);
+- _mural.md: todos os avisos, atividades e materiais postados, do MAIS NOVO para o mais antigo (data e
+  hora, tema, texto, anexos, "id do post" e link);
 - um .txt/.csv para cada arquivo anexado (plano de ensino, cronograma, slides, listas, apostilas...).
-Turmas e arquivos:
+${materiais.atualizado ? `Atualizado do Classroom agora há pouco (${materiais.atualizado}): é o estado atual, inclusive o que acabaram de postar.\n` : ''}${materiais.links ? `${materiais.links}\n` : ''}Turmas e arquivos:
 ${materiais.indice}
+"O que o professor mandou/postou agora", "a última coisa postada": é o PRIMEIRO post do _mural.md da turma.
 
 Se a pergunta for sobre as aulas (conteúdo, plano de ensino, cronograma, o que tem na aula de hoje/da
 semana, avaliações, pesos das notas, bibliografia, professor, regras da disciplina...), VASCULHE os
