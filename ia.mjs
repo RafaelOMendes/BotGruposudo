@@ -365,7 +365,11 @@ vai na figurinha, de quem é a regra...), não chute: use "responder" com uma pe
 
 FIGURINHA: se pedirem para fazer/gerar/transformar em figurinha (sticker), preencha "figurinha" com fazer = true:
   - origem "imagem": usa a imagem ou figurinha que veio junto (na mensagem ou na mensagem respondida).
-  - origem "web": ache uma imagem na internet (URL https direta) do que pediram.
+    Se veio um GIF, vídeo ou figurinha animada, use origem "imagem": o bot faz a figurinha ANIMADA
+    (até 6 s, com texto_cima/texto_baixo por cima se pedirem).
+  - origem "web": ache uma imagem na internet (URL https direta) do que pediram. Se pedirem figurinha
+    animada/GIF de algo, ache a URL DIRETA de um .gif (ex: media.tenor.com, media.giphy.com/.../giphy.gif):
+    a figurinha sai animada.
   - origem "meme": um template da lista de memes, com texto_cima/texto_baixo. O texto do MEME (só ele,
     não o "texto" da resposta) segue este tom:
 ${TOM_MEME.replace(/^/gm, '    ')}
@@ -465,7 +469,7 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '' }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   if (materiais) {
     partes.push(`MATERIAIS DO GOOGLE CLASSROOM DO RAFA (baixados em texto na pasta atual; você PODE e DEVE ler com
@@ -517,6 +521,7 @@ comentário solto), reaja a ela no tom da conversa.`);
       : `${autor} te marcou e disse:\n${pedido || '(só te marcou, sem texto)'}`);
   }
   if (imagens.length) partes.push(`(${imagens.length} imagem(ns) anexada(s) acima.)`);
+  if (animacao) partes.push(`(Veio ${animacao} junto${imagens.length ? "" : ", que você não vê"}. Se pedirem figurinha dele, use origem "imagem": ela sai animada.)`);
   const conteudo = await conteudoCom(imagens, partes.join('\n\n'));
 
   // 1ª tentativa no modelo leve (Haiku). Se ele disser que é complexo demais, refaz no Sonnet.

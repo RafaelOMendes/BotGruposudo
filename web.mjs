@@ -352,6 +352,57 @@ export async function prepararAnexo({ url, tipo, nome }, legenda = '') {
   return montar(real, buffer, { mime, ext, nome, url, legenda });
 }
 
+/** Baixa uma imagem/GIF da web sem converter: { buffer, mime }. */
+export async function baixarMidiaDaWeb(url) {
+  const { buffer, tipo: mime } = await baixarBytes(url, LIMITE.gif);
+  if (mime === 'text/html') throw new Error('o link é uma página, não uma imagem');
+  return { buffer, mime: mime || '' };
+}
+
+/** true se o arquivo é animado (GIF/WebP com mais de um quadro). */
+export async function ehAnimada(buffer) {
+  try { return ((await sharp(buffer, { animated: true }).metadata()).pages || 1) > 1; } catch { return false; }
+}
+
+/**
+ * Figurinha ANIMADA (WebP 512×512, até ~6 s, cabendo em ~500 KB) a partir de GIF, vídeo curto ou
+ * figurinha animada. `camada`: PNG 512×512 transparente com texto, posto por cima de todos os quadros.
+ */
+export async function figurinhaAnimada(buffer, { ext = '', camada = null } = {}) {
+  if (!ffmpeg) throw new Error('o ffmpeg não está instalado, não dá para fazer figurinha animada');
+  // O ffmpeg não lê WebP animado: o sharp converte para GIF antes.
+  if (ext === 'webp' || buffer.subarray(8, 12).toString() === 'WEBP') {
+    buffer = await sharp(buffer, { animated: true }).gif().toBuffer();
+    ext = 'gif';
+  }
+  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-fig-'));
+  try {
+    const entrada = path.join(pasta, `in.${ext || 'mp4'}`);
+    fs.writeFileSync(entrada, buffer);
+    if (camada) fs.writeFileSync(path.join(pasta, 'texto.png'), camada);
+    // Tenta com mais qualidade primeiro; se passar do limite do WhatsApp, reduz.
+    const tentativas = [
+      { fps: 15, q: 60, t: 6 }, { fps: 12, q: 45, t: 6 }, { fps: 10, q: 35, t: 5 }, { fps: 8, q: 25, t: 4 },
+    ];
+    let ultimo = null;
+    for (const { fps, q, t } of tentativas) {
+      const base = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0`;
+      await rodar(ffmpeg, [
+        '-y', '-t', String(t), '-i', entrada,
+        ...(camada ? ['-i', 'texto.png', '-filter_complex', `[0:v]${base}[b];[b][1:v]overlay=0:0[v]`, '-map', '[v]'] : ['-vf', base]),
+        '-an', '-c:v', 'libwebp_anim', '-lossless', '0', '-q:v', String(q), '-compression_level', '4', '-loop', '0',
+        'saida.webp',
+      ], pasta, 2 * 60_000);
+      ultimo = fs.readFileSync(path.join(pasta, 'saida.webp'));
+      if (ultimo.length <= 500 * 1024) return ultimo;
+    }
+    if (ultimo && ultimo.length <= 1000 * 1024) return ultimo;
+    throw new Error('o GIF ficou grande demais para virar figurinha');
+  } finally {
+    try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ }
+  }
+}
+
 /** Compatibilidade: baixa só uma imagem (JPEG). */
 export async function baixarImagemDaWeb(url) {
   const { buffer } = await baixarBytes(url, LIMITE.imagem);

@@ -131,6 +131,16 @@ export async function figurinhaDeImagem(buffer, { cima = '', baixo = '', recorte
     .toBuffer();
 }
 
+/** Camada PNG 512×512 transparente só com o texto (cima/baixo), para pôr sobre figurinha animada. */
+export async function camadaDeTexto({ cima = '', baixo = '' } = {}) {
+  if (!cima.trim() && !baixo.trim()) return null;
+  const w = 512;
+  const h = 512;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
+    blocoTexto(cima, { x: 0, y: 0, w, h: h * 0.4 }, 'topo') + blocoTexto(baixo, { x: 0, y: h * 0.6, w, h: h * 0.4 }, 'base') + '</svg>';
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
 const CORES = {
   branco: ['#ffffff', '#000000'], preto: ['#111111', '#ffffff'], amarelo: ['#ffd500', '#000000'],
   vermelho: ['#ff2d2d', '#ffffff'], azul: ['#2d7bff', '#ffffff'], verde: ['#22c55e', '#000000'],

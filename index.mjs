@@ -31,11 +31,11 @@ import makeWASocket, {
 import { avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
-import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
+import { camadaDeTexto, catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { gerarPdf } from './pdf.mjs';
-import { baixarImagemDaWeb, ehSiteDeVideo, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
+import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -466,19 +466,28 @@ async function iniciar() {
     const c = conteudo(m);
     const ctx = contextoDa(c);
     const imagens = [];
-    if (c.imageMessage || c.stickerMessage) imagens.push(await baixar(m));
+    // GIF, vídeo curto ou figurinha animada (na mensagem ou na citada): vira figurinha animada.
+    let animado = null;
+    const pegarMidia = async (conteudoMsg, msg) => {
+      if (conteudoMsg.imageMessage || conteudoMsg.stickerMessage) {
+        const b = await baixar(msg);
+        imagens.push(b);
+        if (!animado && conteudoMsg.stickerMessage?.isAnimated) animado = { buffer: b, ext: 'webp' };
+      } else if (conteudoMsg.videoMessage && !animado && Number(conteudoMsg.videoMessage.fileLength || 0) <= 25 * 1024 * 1024) {
+        animado = { buffer: await baixar(msg), ext: 'mp4', gif: !!conteudoMsg.videoMessage.gifPlayback };
+      }
+    };
+    await pegarMidia(c, m);
 
     let citada = '';
     if (ctx?.quotedMessage) {
       const q = ctx.quotedMessage;
       const quemCitado = ctx.participant && meusIds().includes(jidNormalizedUser(ctx.participant)) ? 'você (o bot)' : 'alguém do grupo';
       citada = `${quemCitado}: ${resumo(q) || '[mensagem]'}`;
-      if (q.imageMessage || q.stickerMessage) {
-        try {
-          imagens.push(await baixar({ key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: q }));
-        } catch (e) {
-          log('Não deu para baixar a imagem citada:', e.message);
-        }
+      try {
+        await pegarMidia(q, { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: q });
+      } catch (e) {
+        log('Não deu para baixar a mídia citada:', e.message);
       }
     }
 
@@ -517,6 +526,7 @@ async function iniciar() {
         entregas,
         materiais,
         grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
+        animacao: animado ? (animado.ext === 'webp' ? 'uma figurinha animada' : animado.gif ? 'um GIF' : 'um vídeo') : '',
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
         pessoas: pessoasParaPrompt(jid),
       });
@@ -579,7 +589,7 @@ async function iniciar() {
         if (v.acao === 'responder' && v.figurinha?.fazer) {
           try {
             if (v.figurinha.origem === 'gerada') await avisarGerando();
-            figurinhaPronta = await montarFigurinha(v.figurinha, imagens);
+            figurinhaPronta = await montarFigurinha(v.figurinha, imagens, animado);
             servico = 'Figurinha';
             log(`Figurinha (${v.figurinha.origem}) feita para ${autor}.`);
           } catch (e) {
@@ -700,15 +710,21 @@ async function iniciar() {
     return `🤖 *Serviço: ${nome}*${corpo ? `\n${corpo}` : ''}`;
   }
 
-  async function montarFigurinha(f, imagens) {
+  async function montarFigurinha(f, imagens, animado = null) {
     const textos = { cima: f.texto_cima || '', baixo: f.texto_baixo || '' };
     if (f.origem === 'imagem') {
+      // GIF / vídeo / figurinha animada → figurinha animada (texto por cima de todos os quadros).
+      if (animado) return figurinhaAnimada(animado.buffer, { ext: animado.ext, camada: await camadaDeTexto(textos) });
       if (!imagens.length) throw new Error('não veio imagem junto; manda a imagem (ou responde ela) pedindo a figurinha');
       return figurinhaDeImagem(imagens[0], { ...textos, recorte: f.recorte });
     }
     if (f.origem === 'web') {
       if (!f.url) throw new Error('não achei imagem para usar');
-      return figurinhaDeImagem(await baixarImagemDaWeb(f.url), { ...textos, recorte: f.recorte });
+      const { buffer, mime } = await baixarMidiaDaWeb(f.url);
+      if (mime.startsWith('video/') || await ehAnimada(buffer)) {
+        return figurinhaAnimada(buffer, { ext: mime.includes('gif') ? 'gif' : mime.includes('webp') ? 'webp' : 'mp4', camada: await camadaDeTexto(textos) });
+      }
+      return figurinhaDeImagem(buffer, { ...textos, recorte: f.recorte });
     }
     if (f.origem === 'meme') return figurinhaDeMeme({ id: f.meme_id, ...textos });
     if (f.origem === 'gerada') {
