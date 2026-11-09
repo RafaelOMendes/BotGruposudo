@@ -30,10 +30,10 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { acharArea, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
-import { aplicarEfeitos, camadaDeTexto, catalogoParaPrompt, filtroFfmpeg, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
+import { aplicarEfeitos, camadaDeTexto, cortarArea, catalogoParaPrompt, filtroFfmpeg, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { gerarPdf } from './pdf.mjs';
@@ -964,13 +964,22 @@ async function iniciar() {
     return `🤖 *Serviço: ${nome}*${corpo ? `\n${corpo}` : ''}`;
   }
 
+  // Recorte "parte": acha o alvo na foto (Sonnet com grade) e corta só ele.
+  async function recortarSePedido(buffer, f) {
+    if (f.recorte !== 'parte' || !f.alvo) return buffer;
+    const area = await acharArea(buffer, f.alvo);
+    log(`Recorte de "${f.alvo}": ${area.motivo} (x ${(area.x * 100).toFixed(0)}%, y ${(area.y * 100).toFixed(0)}%, ${(area.w * 100).toFixed(0)}x${(area.h * 100).toFixed(0)}%).`);
+    return cortarArea(buffer, area);
+  }
+
   async function montarFigurinha(f, imagens, animado = null) {
     const textos = { cima: f.texto_cima || '', baixo: f.texto_baixo || '' };
+    const recorte = f.recorte === 'quadrado' ? 'quadrado' : 'inteira';
     if (f.origem === 'imagem') {
       // GIF / vídeo / figurinha animada → figurinha animada (texto por cima de todos os quadros).
       if (animado) return figurinhaAnimada(animado.buffer, { ext: animado.ext, camada: await camadaDeTexto(textos), filtro: filtroFfmpeg(f.efeitos) });
       if (!imagens.length) throw new Error('não veio imagem junto; manda a imagem (ou responde ela) pedindo a figurinha');
-      return figurinhaDeImagem(await aplicarEfeitos(imagens[0], f.efeitos), { ...textos, recorte: f.recorte });
+      return figurinhaDeImagem(await aplicarEfeitos(await recortarSePedido(imagens[0], f), f.efeitos), { ...textos, recorte });
     }
     if (f.origem === 'web') {
       if (!f.url) throw new Error('não achei imagem para usar');
@@ -978,7 +987,7 @@ async function iniciar() {
       if (mime.startsWith('video/') || await ehAnimada(buffer)) {
         return figurinhaAnimada(buffer, { ext: mime.includes('gif') ? 'gif' : mime.includes('webp') ? 'webp' : 'mp4', camada: await camadaDeTexto(textos), filtro: filtroFfmpeg(f.efeitos) });
       }
-      return figurinhaDeImagem(await aplicarEfeitos(buffer, f.efeitos), { ...textos, recorte: f.recorte });
+      return figurinhaDeImagem(await aplicarEfeitos(await recortarSePedido(buffer, f), f.efeitos), { ...textos, recorte });
     }
     if (f.origem === 'meme') return figurinhaDeMeme({ id: f.meme_id, ...textos });
     if (f.origem === 'gerada') {

@@ -26,6 +26,7 @@ const MODELOS = {
   mencao: { modelo: HAIKU, esforco: 'medium' },                   // marcação (conversa, pesquisa, regras)
   complexo: { modelo: 'claude-sonnet-5-5', esforco: 'medium' },   // só quando o Haiku pede ajuda
   entregas: { modelo: HAIKU, esforco: 'low' },                    // atividade vale nota / é importante?
+  localizar: { modelo: 'claude-sonnet-5-5', esforco: 'low' },     // onde está a pessoa a recortar da foto
 };
 const PROIBIDO = /opus|fable|mythos/i;
 
@@ -313,11 +314,12 @@ const SCHEMA_MENCAO = {
         texto: { type: 'string', description: 'origem texto: o texto da figurinha' },
         prompt: { type: 'string', description: 'origem gerada: descrição da imagem, em inglês e detalhada' },
         cor: { type: 'string', enum: ['branco', 'preto', 'amarelo', 'vermelho', 'azul', 'verde', 'rosa', 'roxo', 'laranja'] },
-        recorte: { type: 'string', enum: ['inteira', 'quadrado'] },
+        recorte: { type: 'string', enum: ['inteira', 'quadrado', 'parte'], description: 'parte = recortar só uma pessoa/coisa da imagem (descrita em "alvo")' },
+        alvo: { type: 'string', description: 'recorte parte: o que recortar, bem específico (ex: "a terceira pessoa da esquerda para a direita", "o cara de boné azul", "o cachorro"); senão ""' },
         efeitos: { type: 'array', description: 'filtros aplicados na imagem (origem imagem/web), na ordem; [] se nenhum', items: { type: 'string', enum: ['inverter_cores', 'preto_e_branco', 'sepia', 'espelhar', 'virar_de_cabeca_pra_baixo', 'girar_90', 'desfocar', 'pixelar', 'saturar', 'brilho_alto', 'escurecer'] } },
         varias: { type: 'boolean', description: 'true = uma figurinha para CADA imagem/GIF/vídeo que a pessoa mandou nos últimos minutos ("de cada imagem", "de todas", "dessas")' },
       },
-      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte', 'efeitos', 'varias'],
+      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte', 'alvo', 'efeitos', 'varias'],
       additionalProperties: false,
     },
     anexos: {
@@ -383,8 +385,14 @@ ${TOM_MEME.replace(/^/gm, '    ')}
   - origem "texto": figurinha só com o texto (campo "texto"), escolha uma "cor".
   Se pedirem texto escrito na imagem, use texto_cima/texto_baixo. recorte "quadrado" só se pedirem
   para cortar/centralizar; senão "inteira". Pedido de figurinha sem imagem e sem dizer o que é: pergunte.
+  RECORTAR: se pedirem para recortar/pegar só uma pessoa ou coisa da foto ("recorta só a terceira pessoa",
+  "só o Nicolas", "tira só a cara dele", "só o cachorro"), use origem "imagem" (ou "web"), recorte "parte"
+  e descreva em "alvo" exatamente o que recortar, de um jeito que dê para achar na foto (posição contando
+  da esquerda para a direita, roupa, cabelo, o que está fazendo). Se pedirem pelo NOME e você não souber
+  quem é na foto, pergunte qual é (ex: "qual deles é o Nicolas, o de preto?"). O bot recorta DE VERDADE:
+  nunca diga que não consegue recortar, e não use a IA de imagem para isso.
   O "texto" da resposta vira a legenda curta do serviço (ex: "figurinha do Nicolas feita"). Se não for
-  figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira", "efeitos": []).
+  figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira", "alvo": "", "efeitos": []).
   VÁRIAS: se pedirem figurinha de várias mídias ("de cada imagem que mandei", "de todas", "dessas fotos",
   "gif e vídeo também"), use origem "imagem" com varias = true: o bot junta TUDO que a pessoa mandou nos
   últimos minutos (fotos, álbum, GIFs, vídeos, figurinhas) e faz uma figurinha para cada. Senão varias = false.
@@ -731,4 +739,64 @@ ${catalogo}`;
   const v = r.structured_output;
   if (!v?.meme_id) throw new Error('claude não escolheu meme');
   return v;
+}
+
+// ---------- recortar uma pessoa/coisa da foto ----------
+const SCHEMA_AREA = {
+  type: 'object',
+  properties: {
+    achou: { type: 'boolean' },
+    motivo: { type: 'string', description: 'curto: quem/o que você recortou, ou por que não achou' },
+    esquerda: { type: 'number', description: '% da largura (0-100) da borda esquerda da caixa' },
+    topo: { type: 'number', description: '% da altura (0-100) da borda de cima da caixa' },
+    direita: { type: 'number', description: '% da largura (0-100) da borda direita da caixa' },
+    base: { type: 'number', description: '% da altura (0-100) da borda de baixo da caixa' },
+  },
+  required: ['achou', 'motivo', 'esquerda', 'topo', 'direita', 'base'],
+  additionalProperties: false,
+};
+
+const SISTEMA_AREA = `Você acha uma pessoa ou coisa numa foto para o bot recortar e virar figurinha.
+A foto tem uma grade por cima: linhas a cada 10%, com a porcentagem escrita nas bordas (0 a 100,
+da esquerda para a direita e de cima para baixo). Use a grade para medir.
+Devolva a caixa que contém o alvo INTEIRO que aparece na foto (pessoa: da cabeça/cabelo até onde o
+corpo aparece, com os braços), justa, sem pegar outra pessoa. "Terceira pessoa" = contando da
+esquerda para a direita, salvo se disserem outra ordem. Se pedirem só o rosto/cara, a caixa é só
+da cabeça. Se o alvo não estiver na foto ou for ambíguo demais, achou = false e explique em motivo.`;
+
+/** Desenha a grade de porcentagem por cima da imagem (para o modelo medir a posição). */
+async function comGrade(buffer) {
+  const base = await sharp(buffer, { animated: false }).rotate()
+    .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true }).flatten({ background: '#ffffff' }).png().toBuffer();
+  const { width: w, height: h } = await sharp(base).metadata();
+  const fonte = Math.max(12, Math.round(Math.min(w, h) / 40));
+  let svg = '';
+  for (let i = 1; i < 10; i++) {
+    const x = (w * i) / 10, y = (h * i) / 10;
+    svg += `<line x1="${x}" y1="0" x2="${x}" y2="${h}" stroke="#ff00ff" stroke-opacity="0.55" stroke-width="1.5"/>`;
+    svg += `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="#ff00ff" stroke-opacity="0.55" stroke-width="1.5"/>`;
+    for (const [tx, ty] of [[x + 2, fonte], [x + 2, h - 4]]) svg += `<text x="${tx}" y="${ty}" font-size="${fonte}" font-family="Arial" font-weight="bold" fill="#ff00ff" stroke="#fff" stroke-width="3" paint-order="stroke">${i * 10}</text>`;
+    for (const tx of [2, w - fonte * 1.6]) svg += `<text x="${tx}" y="${y - 2}" font-size="${fonte}" font-family="Arial" font-weight="bold" fill="#ff00ff" stroke="#fff" stroke-width="3" paint-order="stroke">${i * 10}</text>`;
+  }
+  return sharp(base).composite([{ input: Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">${svg}</svg>`) }]).png().toBuffer();
+}
+
+/**
+ * Acha onde está o alvo ("a terceira pessoa", "o de boné") na imagem.
+ * Devolve { x, y, w, h } em fração (0-1) da imagem, ou lança erro com o motivo se não achar.
+ */
+export async function acharArea(buffer, alvo) {
+  const grade = await comGrade(buffer);
+  const conteudo = [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: grade.toString('base64') } },
+    { type: 'text', text: `Recortar: ${alvo}` },
+  ];
+  const r = await perguntar({ sistema: SISTEMA_AREA, conteudo, schema: SCHEMA_AREA, tarefa: 'localizar', timeoutMs: 120_000 });
+  const a = r.structured_output || JSON.parse(r.result);
+  if (!a.achou) throw new Error(a.motivo || `não achei ${alvo} na foto`);
+  const lim = (n) => Math.min(100, Math.max(0, Number(n) || 0)) / 100;
+  const [x0, x1] = [lim(a.esquerda), lim(a.direita)].sort((p, q) => p - q);
+  const [y0, y1] = [lim(a.topo), lim(a.base)].sort((p, q) => p - q);
+  if (x1 - x0 < 0.02 || y1 - y0 < 0.02) throw new Error(`não consegui marcar ${alvo} na foto`);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, motivo: a.motivo };
 }

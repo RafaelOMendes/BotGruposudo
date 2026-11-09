@@ -225,3 +225,18 @@ export async function figurinhaDeTexto(texto, { cor = 'branco' } = {}) {
     '</svg>';
   return sharp(Buffer.from(svg)).webp({ quality: 90 }).toBuffer();
 }
+
+/**
+ * Recorta uma área da imagem (x, y, w, h em fração 0-1), com uma margem pequena em volta.
+ * A rotação do EXIF é aplicada antes, igual à imagem que o modelo viu. Devolve PNG.
+ */
+export async function cortarArea(buffer, { x, y, w, h }, margem = 0.04) {
+  const girada = await sharp(buffer, { animated: false }).rotate().png().toBuffer();
+  const { width: W, height: H } = await sharp(girada).metadata();
+  const mx = margem * Math.max(w, 0.1), my = margem * Math.max(h, 0.1);
+  const left = Math.max(0, Math.floor((x - mx) * W));
+  const top = Math.max(0, Math.floor((y - my) * H));
+  const right = Math.min(W, Math.ceil((x + w + mx) * W));
+  const bottom = Math.min(H, Math.ceil((y + h + my) * H));
+  return sharp(girada).extract({ left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) }).png().toBuffer();
+}
