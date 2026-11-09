@@ -304,6 +304,9 @@ function nomeDaPessoa(...ids) {
 }
 for (const g of mensagensGuardadas.values()) if (g.nome && !g.key.fromMe) { lembrarNome(g.key.participant, g.nome); lembrarNome(g.key.participantAlt, g.nome); }
 
+// Tira o rótulo "🤖 *Serviço: X*" (um ou vários) do começo do texto.
+const semRotulo = (t) => String(t || '').replace(/^(\s*🤖\s*\*?Servi[çc]o:[^*\n]*\*?\s*)+/u, '');
+
 // Cópia de verdade: ao responder uma mensagem, o Baileys APAGA o contextInfo (a quem ela respondia)
 // do objeto original. Sem cópia, o fio se partia em toda mensagem que o bot respondeu.
 function copiaDaMensagem(message) {
@@ -651,7 +654,7 @@ async function iniciar() {
       if (nivel > 0 || !ctx?.stanzaId) {
         if (!guardada) break; // o fio sai do que o bot viu desde que ligou
         const quem = guardada.key.fromMe ? 'você (o bot)' : guardada.nome || nomeDaPessoa(guardada.key.participant, guardada.key.participantAlt) || 'alguém';
-        fio.unshift(`${quem}: ${semMeuArroba(resumo(conteudo(guardada))).replace(/\s+/g, ' ').slice(0, 600) || '[mensagem]'}`);
+        fio.unshift(`${quem}: ${semMeuArroba(semRotulo(resumo(conteudo(guardada)))).replace(/\s+/g, ' ').slice(0, 600) || '[mensagem]'}`);
         if (!imagens.length && !animado) {
           try { await pegarMidia(conteudo(guardada), guardada); } catch (e) { log('Não deu para baixar a mídia do fio:', e.message); }
         }
@@ -914,7 +917,7 @@ async function iniciar() {
 
   // Serviço (baixar, fazer figurinha, criar regra...) leva uma marca no topo; resposta comum não.
   function marcaServico(nome, texto) {
-    const corpo = String(texto || '').trim();
+    const corpo = semRotulo(texto).trim(); // o Claude às vezes copia o rótulo do histórico: não repete
     return `🤖 *Serviço: ${nome}*${corpo ? `\n${corpo}` : ''}`;
   }
 
@@ -1062,7 +1065,7 @@ async function iniciar() {
     for (const g of mensagensGuardadas.values()) {
       if (g.key.remoteJid !== jid || g.key.id === semId) continue;
       const texto = resumo(conteudo(g));
-      if (texto) itens.push({ em: g.em || 0, nome: nomeDe(g), texto: semMeuArroba(texto) });
+      if (texto) itens.push({ em: g.em || 0, nome: nomeDe(g), texto: semMeuArroba(semRotulo(texto)) });
     }
     itens.push(...(notasInternas.get(jid) || []));
     return itens
