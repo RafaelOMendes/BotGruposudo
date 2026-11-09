@@ -22,7 +22,7 @@ const ESCOPOS = [
   'https://www.googleapis.com/auth/drive.readonly',
 ];
 // Perguntas sobre as aulas/matérias: o Claude procura nos materiais do Classroom.
-export const PERGUNTA_AULA = /\b(aulas?|mat[eé]rias?|disciplinas?|cadeiras?|plano|ensino|ementa|cronograma|conte[uú]dos?|materia(l|is)|slides?|apostilas?|bibliografia|livros?|professor\w*|profs?|sor|classroom|facul\w*|semestre|unidades?|cap[ií]tulos?|lista de exerc\w*|pesos?|m[eé]dia|recupera[cç][aã]o|vale|p[1-4])\b/i;
+export const PERGUNTA_AULA = /\b(aulas?|mat[eé]rias?|disciplinas?|cadeiras?|plano|ensino|ementa|cronograma|conte[uú]dos?|materia(l|is)|slides?|apostilas?|bibliografia|livros?|professor\w*|profs?|sor|classroom|class|quest(?:[oõ]es|[aã]o)|revis[aã]o|exerc[ií]cios?|listas?|pdf|facul\w*|semestre|unidades?|cap[ií]tulos?|lista de exerc\w*|pesos?|m[eé]dia|recupera[cç][aã]o|vale|p[1-4])\b/i;
 // Onde ficam os materiais em texto: entregas.classroom.pastaMateriais no config.json (ex: no HD).
 export const PASTA_MATERIAIS = (() => {
   try {

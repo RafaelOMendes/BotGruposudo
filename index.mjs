@@ -34,6 +34,7 @@ import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNT
 import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
+import { gerarPdf } from './pdf.mjs';
 import { baixarImagemDaWeb, ehSiteDeVideo, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -562,10 +563,25 @@ async function iniciar() {
           }
         }
 
+        // PDF escrito pelo Claude (questões resolvidas, resumo...): o Chrome headless gera o arquivo.
+        if (v.acao === 'responder' && v.documento?.fazer && v.documento.html?.trim()) {
+          try {
+            const pdf = await gerarPdf({ titulo: v.documento.titulo || 'Documento', html: v.documento.html }, { navegador: local.navegador });
+            const nome = `${(v.documento.nome || v.documento.titulo || 'documento').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80) || 'documento'}.pdf`;
+            anexos.unshift({ pronto: { document: pdf, mimetype: 'application/pdf', fileName: nome, caption: '' } });
+            servico = 'PDF';
+            log(`PDF "${nome}" gerado para ${autor} (${Math.round(pdf.length / 1024)} KB).`);
+          } catch (e) {
+            log(`Não deu para gerar o PDF (${e.message}).`);
+            resposta = `${resposta || ''}\n\nNão consegui gerar o PDF agora (${e.message}).`.trim();
+          }
+        }
+
         // Baixa o que o Claude pediu para mandar (com as travas de segurança do web.mjs).
         const prontos = [];
         const falhas = [];
         for (const a of anexos) {
+          if (a.pronto) { prontos.push(a.pronto); continue; }
           if (a.gerada) { prontos.push({ image: a.gerada, caption: '' }); continue; }
           try {
             prontos.push(await prepararAnexo(a, ''));

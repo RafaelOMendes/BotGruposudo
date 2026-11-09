@@ -286,11 +286,23 @@ const SCHEMA_MENCAO = {
         additionalProperties: false,
       },
     },
+    documento: {
+      type: 'object',
+      description: 'PDF que VOCÊ escreve e o bot gera e manda no grupo (fazer=false se não pediram)',
+      properties: {
+        fazer: { type: 'boolean' },
+        nome: { type: 'string', description: 'nome do arquivo sem extensão, ex: "Questoes de Revisao IA - respondidas"' },
+        titulo: { type: 'string', description: 'título no topo do PDF' },
+        html: { type: 'string', description: 'conteúdo inteiro do PDF em HTML simples (h2, h3, p, ol, ul, li, b, i, table, pre, code; questão em <div class="questao">, resposta em <p class="resposta">). Sem <html>/<head>, sem script, sem imagens externas.' },
+      },
+      required: ['fazer', 'nome', 'titulo', 'html'],
+      additionalProperties: false,
+    },
   },
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
-    'precisa_modelo_maior', 'figurinha', 'imagem_gerada',
+    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento',
   ],
   additionalProperties: false,
 };
@@ -318,6 +330,16 @@ ${TOM_MEME.replace(/^/gm, '    ')}
   O "texto" da resposta vira a legenda curta do serviço (ex: "figurinha do Nicolas feita"). Se não for
   figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira").
 GERAR IMAGEM: {{GERAR}}
+
+PDF / DOCUMENTO: se pedirem para FAZER algo e mandar como PDF/arquivo/documento (resolver questões ou
+lista de exercícios, resumo, trabalho, roteiro, tabela...), escreva você mesmo o conteúdo COMPLETO em
+"documento" (fazer = true, nome, titulo, html): o bot gera o PDF e manda no grupo. Nunca diga que não
+consegue gerar PDF. Se o pedido se refere a algo do Classroom (ex: "as questões de revisão do class"),
+ache o arquivo nos materiais, leia ele INTEIRO (Read com offset/limit até o fim) e faça TODAS as
+questões, na ordem, sem pular nenhuma. Para cada questão: o enunciado resumido, a resposta (em múltipla
+escolha, a letra e o texto da alternativa) e uma justificativa curta. Se tiver muitas questões, comece
+com um gabarito em tabela (nº | resposta). O "texto" vira a legenda do PDF: curta, diga o que tem nele.
+Se não for documento: fazer = false, nome = "", titulo = "", html = "".
 
 Templates de meme (id | nome):
 {{CATALOGO}}
@@ -454,7 +476,8 @@ Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o ace
 const ESCALAR_LEVE = `MODELO: você é o modelo leve do bot. Quase tudo você resolve: conversa, perguntas, zoeira,
 pesquisas comuns na web, achar/mandar vídeo, imagem ou link, criar/apagar regras, resumir conversa.
 Só se o pedido for COMPLEXO de verdade (programa ou código grande, conta/análise de várias etapas,
-texto longo e elaborado, comparar muitas fontes a fundo) e você não conseguir fazer bem, marque
+texto longo e elaborado, comparar muitas fontes a fundo, PDF que resolve questões/lista de exercícios
+ou documento longo) e você não conseguir fazer bem, marque
 precisa_modelo_maior = true e deixe o resto vazio: um modelo maior vai refazer. Na dúvida, faça você mesmo.`;
 const ESCALAR_FORTE = 'MODELO: você é o modelo mais forte do bot; faça o pedido completo. precisa_modelo_maior = false.';
 
@@ -494,6 +517,8 @@ GERE SEM FRESCURA. É um grupo de amigos brincando entre si, e eles querem image
     tarefa,
     ferramentas: ['WebSearch', 'WebFetch'],
     ...(materiais ? { cwd: materiais.pasta, leitura: ['Read', 'Grep', 'Glob'], timeoutMs: 300_000 } : {}),
+    // Documento grande (ex: 100 questões resolvidas) no modelo maior leva vários minutos.
+    ...(tarefa === 'complexo' ? { timeoutMs: 720_000 } : {}),
   });
   const v = r.structured_output;
   if (!v?.acao) {
