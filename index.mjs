@@ -22,6 +22,7 @@ import NodeCache from '@cacheable/node-cache';
 import makeWASocket, {
   Browsers,
   BufferJSON,
+  proto,
   DisconnectReason,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
@@ -242,9 +243,19 @@ process.on('exit', salvarMensagens);
 function guardarMensagem(msg, nome) {
   if (!msg?.key?.id || !msg.message) return;
   mensagensGuardadas.delete(msg.key.id); // reinsere no fim (mais recente)
-  mensagensGuardadas.set(msg.key.id, { key: msg.key, message: msg.message, nome: nome || '' });
+  mensagensGuardadas.set(msg.key.id, { key: { ...msg.key }, message: copiaDaMensagem(msg.message), nome: nome || '', em: numero(msg.messageTimestamp) || Math.floor(Date.now() / 1000) });
   while (mensagensGuardadas.size > 1500) mensagensGuardadas.delete(mensagensGuardadas.keys().next().value);
   timerSalvar ??= setTimeout(salvarMensagens, 5000); // junta várias mensagens numa gravação
+}
+
+// Cópia de verdade: ao responder uma mensagem, o Baileys APAGA o contextInfo (a quem ela respondia)
+// do objeto original. Sem cópia, o fio se partia em toda mensagem que o bot respondeu.
+function copiaDaMensagem(message) {
+  try {
+    return proto.Message.decode(proto.Message.encode(message).finish());
+  } catch {
+    return JSON.parse(JSON.stringify(message, BufferJSON.replacer), BufferJSON.reviver);
+  }
 }
 
 // Número de um campo que pode vir como Long do protobuf (ou objeto {low, high} depois de salvo em JSON).
@@ -898,12 +909,23 @@ async function iniciar() {
   // Histórico curto por grupo (só em memória), usado como contexto para o Claude.
   const historicos = new Map();
   const horaBrasil = () => new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
-  function registrar(jid, nome, texto) {
+  function registrar(jid, nome, texto, idAtual = null) {
     if (!texto) return;
-    const lista = historicos.get(jid) || [];
+    const lista = historicos.get(jid) || historicoSalvo(jid, idAtual);
     lista.push(`[${horaBrasil()}] ${nome}: ${texto.replace(/\s+/g, ' ').slice(0, 500)}`);
     while (lista.length > CONFIG.mencao.historicoLeitura + 1) lista.shift();
     historicos.set(jid, lista);
+  }
+
+  // Depois de reiniciar, o histórico recente do grupo vem das mensagens salvas em disco.
+  function historicoSalvo(jid, idAtual) {
+    const hora = (s) => new Date(s * 1000).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+    return [...mensagensGuardadas.values()]
+      .filter((g) => g.key.remoteJid === jid && g.key.id !== idAtual)
+      .map((g) => ({ g, texto: resumo(conteudo(g)) }))
+      .filter(({ texto }) => texto)
+      .slice(-CONFIG.mencao.historicoLeitura)
+      .map(({ g, texto }) => `[${hora(g.em || 0)}] ${g.key.fromMe ? 'Bot' : g.nome || 'alguém'}: ${texto.replace(/\s+/g, ' ').slice(0, 500)}`);
   }
 
   // Pedidos do tipo "lê aí", "resume a conversa", "o que o fulano falou?" liberam o histórico longo.
@@ -933,7 +955,7 @@ async function iniciar() {
           if (edicao.message) await tratarEdicao({ ...m.key, id: edicao.id }, edicao.message, m.pushName, 'mensagem');
           continue;
         }
-        registrar(jid, m.key.fromMe ? 'Bot' : m.pushName || digitos(m.key.participant || ''), resumo(conteudo(m)));
+        registrar(jid, m.key.fromMe ? 'Bot' : m.pushName || digitos(m.key.participant || ''), resumo(conteudo(m)), m.key.id);
         lembrarPessoa(jid, m);
         if (!m.key.fromMe && resumo(conteudo(m))) contadorMsgs.set(jid, (contadorMsgs.get(jid) || 0) + 1);
         if (m.key.fromMe || jaRespondidas.has(m.key.id)) continue;
