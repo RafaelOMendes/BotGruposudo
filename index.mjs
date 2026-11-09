@@ -960,12 +960,37 @@ async function iniciar() {
     return null;
   }
 
+  /** Conteúdo editado + o que só a original tem (citação, mídia da legenda). */
+  function juntarEdicao(originalMsg, editada) {
+    if (!originalMsg) return editada;
+    const orig = conteudo({ message: originalMsg });
+    const novoTexto = editada.conversation ?? editada.extendedTextMessage?.text
+      ?? editada.imageMessage?.caption ?? editada.videoMessage?.caption;
+    const novoCtx = contextoDa(editada) || {};
+    const ctxOrig = contextoDa(orig) || {};
+    const ctx = { ...ctxOrig, ...novoCtx };
+    // citação da original, se a edição não trouxe
+    for (const k of ['stanzaId', 'participant', 'quotedMessage', 'remoteJid']) if (!novoCtx[k] && ctxOrig[k]) ctx[k] = ctxOrig[k];
+    if (novoCtx.mentionedJid?.length) ctx.mentionedJid = novoCtx.mentionedJid;
+    // mídia com legenda: mantém a mídia, troca a legenda
+    for (const tipo of ['imageMessage', 'videoMessage']) {
+      if (orig[tipo]) return { [tipo]: { ...orig[tipo], caption: novoTexto ?? orig[tipo].caption, contextInfo: ctx } };
+    }
+    if (novoTexto == null) return editada;
+    return { extendedTextMessage: { ...(editada.extendedTextMessage || {}), text: novoTexto, contextInfo: ctx } };
+  }
+
   async function tratarEdicao(key, editada, pushName, origem) {
     const jid = key.remoteJid;
     if (key.fromMe || !isJidGroup(jid) || !CONFIG.mencao.ativo || !ia) return;
     const autorId = jidNormalizedUser(key.participant || '');
     const nome = pushName || conhecidos.get(jid)?.get(digitos(autorId)) || digitos(autorId);
-    const m = { key, message: editada, pushName: nome, messageTimestamp: Date.now() / 1000 };
+    // A edição traz só o conteúdo novo (texto, @). A quem a mensagem respondia (e a mídia, se era
+    // legenda) fica na ORIGINAL: junta as duas, para o bot ter a mensagem respondida e o fio.
+    const original = mensagensGuardadas.get(key.id);
+    const message = juntarEdicao(original?.message, editada);
+    if (original) mensagensGuardadas.set(key.id, { ...original, message });
+    const m = { key, message, pushName: nome, messageTimestamp: Date.now() / 1000 };
     const texto = textoDa(m);
     const chave = `${key.id}|${texto}`;
     if (edicoesVistas.has(chave)) return; // a mesma edição pelo outro caminho
