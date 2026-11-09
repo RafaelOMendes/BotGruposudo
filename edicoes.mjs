@@ -9,11 +9,8 @@ const segredos = new Map(); // id da mensagem -> { segredo, autores: [jid...] }
 const MAX = 2000;
 
 /** Guarda o segredo de cada mensagem recebida (só existe em memória; reiniciar esquece). */
-export let diagnostico = null; // função de log, quando ligada
-export const ligarDiagnostico = (f) => { diagnostico = f; };
 export function guardarSegredo(m) {
   const segredo = m.message?.messageContextInfo?.messageSecret;
-  diagnostico?.(`[diag] msg ${m.key?.id} de ${m.key?.participant} chaves=${Object.keys(m.message || {}).join(',')} ctxInfo=${Object.keys(m.message?.messageContextInfo || {}).join(',')} segredo=${segredo?.length || 0}`);
   if (!segredo?.length || !m.key?.id) return;
   const autores = [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
   segredos.set(m.key.id, { segredo: Buffer.from(segredo), autores });
@@ -43,7 +40,6 @@ export function decifrarEdicao(m) {
   const id = s.targetMessageKey?.id;
   if (!id) return null;
   const original = segredos.get(id);
-  diagnostico?.(`[diag] edição alvo=${JSON.stringify(s.targetMessageKey)} de ${m.key?.participant}/${m.key?.participantAlt} tenho=${!!original} guardados=${segredos.size}`);
   if (!original) return { id, erro: 'não vi a mensagem original (chegou antes do bot ligar?)' };
   const editores = [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
   const payload = Buffer.from(s.encPayload);

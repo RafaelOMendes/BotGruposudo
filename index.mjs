@@ -35,8 +35,7 @@ import { aplicarEfeitos, camadaDeTexto, catalogoParaPrompt, filtroFfmpeg, figuri
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { gerarPdf } from './pdf.mjs';
-import { decifrarEdicao, guardarSegredo, ligarDiagnostico } from './edicoes.mjs';
-ligarDiagnostico((t) => log(t)); // TEMPORÁRIO: diagnóstico das edições
+import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
