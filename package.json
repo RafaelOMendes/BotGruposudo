@@ -13,10 +13,16 @@
     "@cacheable/node-cache": "^3.1.1",
     "audio-decode": "^2.2.3",
     "baileys": "^7.0.0-rc14",
+    "officeparser": "8.2.0",
     "pino": "^10.4.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "sharp": "^0.35.5"
   },
-  "private": true
+  "private": true,
+  "overrides": {
+    "officeparser": {
+      "file-type": "22.2.0"
+    }
+  }
 }

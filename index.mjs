@@ -30,7 +30,7 @@ import makeWASocket, {
 } from 'baileys';
 import { avaliarEntregas, avaliarNonsense, configurarModelos, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
-import { vigiarLogin } from './classroom.mjs';
+import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
 import { catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
@@ -257,6 +257,7 @@ const naFilaDoClaude = (f) => {
 };
 
 // ---------- avisos de entregas da faculdade (12h, 20h e 22h) ----------
+let sincronizarMateriais = null;
 if (local.entregas?.ativo && ia) {
   iniciarAvisos({
     cfg: local.entregas,
@@ -273,7 +274,11 @@ if (local.entregas?.ativo && ia) {
     },
   });
   // Login do Classroom expirou → abre o navegador sozinho para entrar de novo.
-  if (local.entregas.classroom?.clientId) vigiarLogin(local.entregas.classroom, { log });
+  if (local.entregas.classroom?.clientId) {
+    vigiarLogin(local.entregas.classroom, { log });
+    // Materiais do Classroom (avisos, plano de ensino, slides...) em texto, para o Claude procurar.
+    sincronizarMateriais = manterMateriais(local.entregas.classroom, { log });
+  }
 }
 
 // ---------- conexão ----------
@@ -469,8 +474,19 @@ async function iniciar() {
           log(`Não deu para buscar as entregas (${e.message}).`);
         }
       }
+      // Pergunta sobre as aulas/matérias → o Claude vasculha os materiais do Classroom.
+      let materiais = null;
+      if (sincronizarMateriais && (PERGUNTA_AULA.test(`${pedido} ${citada}`) || entregas)) {
+        if (!indiceMateriais()) await sincronizarMateriais();
+        const indice = indiceMateriais();
+        if (indice) {
+          materiais = { indice, pasta: PASTA_MATERIAIS };
+          log('Marcação sobre aulas: o Claude vai procurar nos materiais do Classroom.');
+        }
+      }
       return interpretarMencao({
         entregas,
+        materiais,
         grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
         pessoas: pessoasParaPrompt(jid),

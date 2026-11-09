@@ -52,7 +52,8 @@
     ],
     "classroom": {
       "clientId": "xxxx.apps.googleusercontent.com",
-      "clientSecret": "GOCSPX-..."
+      "clientSecret": "GOCSPX-...",
+      "pastaMateriais": "D:/BotGruposudo/classroom_materiais"
     }
   }
 }

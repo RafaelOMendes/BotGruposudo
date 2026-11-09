@@ -52,10 +52,11 @@ export async function iniciarIA(caminho = 'claude') {
   }
 }
 
-function executar(cmd, args, entrada, timeoutMs) {
-  // Diretório vazio e descartável: nada de CLAUDE.md, projeto ou arquivos por perto.
-  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-'));
-  const limpar = () => { try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ } };
+function executar(cmd, args, entrada, timeoutMs, cwd) {
+  // Diretório vazio e descartável: nada de CLAUDE.md, projeto ou arquivos por perto. Com `cwd`
+  // (materiais do Classroom), roda lá dentro para o Claude só conseguir ler aquela pasta.
+  const pasta = cwd || fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-'));
+  const limpar = () => { if (cwd) return; try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ } };
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { cwd: pasta, windowsHide: true });
     let out = '';
@@ -93,7 +94,7 @@ export async function blocoImagem(buffer) {
  * @param {string[]} [o.ferramentas] ferramentas liberadas (ex: ['WebSearch'])
  * @param {string} [o.esforco] low | medium | high
  */
-async function perguntar({ conteudo, sistema, schema, ferramentas = [], tarefa, timeoutMs = 180_000 }) {
+async function perguntar({ conteudo, sistema, schema, ferramentas = [], tarefa, timeoutMs = 180_000, cwd, leitura = [] }) {
   const { modelo, esforco } = MODELOS[tarefa] || {};
   if (!comando) throw new Error('claude CLI não encontrado');
   const args = [
@@ -102,7 +103,7 @@ async function perguntar({ conteudo, sistema, schema, ferramentas = [], tarefa, 
     '--output-format', 'stream-json',
     '--verbose',
     '--system-prompt', sistema,
-    '--tools', ferramentas.join(','),
+    '--tools', [...ferramentas, ...leitura].join(','),
     '--no-session-persistence',
     '--strict-mcp-config',
     '--disable-slash-commands',
@@ -114,7 +115,7 @@ async function perguntar({ conteudo, sistema, schema, ferramentas = [], tarefa, 
   if (esforco) args.push('--effort', esforco);
 
   const entrada = JSON.stringify({ type: 'user', message: { role: 'user', content: conteudo } }) + '\n';
-  const saida = await executar(comando, args, entrada, timeoutMs);
+  const saida = await executar(comando, args, entrada, timeoutMs, cwd);
 
   const linhas = saida.trim().split('\n');
   const final = linhas.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((e) => e?.type === 'result').pop();
@@ -153,7 +154,6 @@ const TEXTO_MEME = `Para meme: escolha um template da lista (pelo id) que combin
 texto_cima e texto_baixo curtos (até ~8 palavras cada) em português, no estilo do template
 (ex: Drake = cima o que ele rejeita, baixo o que ele prefere). O meme é uma resposta zoando.`;
 
-async function conteudoCom(imagens, texto) {
 // Só para o TEXTO DOS MEMES: bem mais ácido que o chat (que continua com o TOM normal).
 const TOM_MEME = `- Português do Brasil, linguagem de meme de grupo de amigos.
 - Aqui pode e deve ser ÁCIDO: sarcasmo, ironia pesada, deboche, humor negro leve, esculacho de amigo.
@@ -166,6 +166,7 @@ const TOM_MEME = `- Português do Brasil, linguagem de meme de grupo de amigos.
   doença; nada de ameaça, nem de expor coisa realmente íntima ou séria de alguém.
 - Sem emoji no texto do meme.`;
 
+async function conteudoCom(imagens, texto) {
   const c = [];
   for (const img of imagens.slice(0, 3)) c.push(await blocoImagem(img));
   c.push({ type: 'text', text: texto });
@@ -396,8 +397,24 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '' }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
+  if (materiais) {
+    partes.push(`MATERIAIS DO GOOGLE CLASSROOM DO RAFA (baixados em texto na pasta atual; você PODE e DEVE ler com
+Glob, Grep e Read, é a exceção à regra de não acessar arquivos). Cada turma é uma pasta com:
+- _mural.md: todos os avisos, atividades e materiais postados (data, tema, texto, anexos e links);
+- um .txt/.csv para cada arquivo anexado (plano de ensino, cronograma, slides, listas, apostilas...).
+Turmas e arquivos:
+${materiais.indice}
+
+Se a pergunta for sobre as aulas (conteúdo, plano de ensino, cronograma, o que tem na aula de hoje/da
+semana, avaliações, pesos das notas, bibliografia, professor, regras da disciplina...), VASCULHE os
+materiais antes de responder: ache a turma certa, leia o _mural.md e procure com Grep por datas
+(ex: "09/11", "9/11", "09/nov"), nomes de aula, "plano", "cronograma", "avalia" etc.; o plano de ensino
+costuma ser um arquivo com o cronograma das aulas inteiro. Abra os arquivos que parecerem relevantes.
+Responda com o que achou (diga de onde: arquivo/turma). Só diga que não achou se procurou e não tem nada.
+Os nomes das matérias podem vir abreviados na pergunta (ex: "álg" = Álgebra Linear, "calc" = Cálculo).`);
+  }
   if (entregas) {
     partes.push(`ENTREGAS DA FACULDADE (Moodle e Google Classroom do Rafa, consultados agora; prazos no horário de Brasília):
 ${entregas}
@@ -426,9 +443,9 @@ Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o ace
   const conteudo = await conteudoCom(imagens, partes.join('\n\n'));
 
   // 1ª tentativa no modelo leve (Haiku). Se ele disser que é complexo demais, refaz no Sonnet.
-  let v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa: 'mencao' });
+  let v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa: 'mencao', materiais });
   if (v.precisa_modelo_maior) {
-    v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa: 'complexo' });
+    v = await perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa: 'complexo', materiais });
     v.usouModeloMaior = true;
   }
   return v;
@@ -441,7 +458,7 @@ texto longo e elaborado, comparar muitas fontes a fundo) e você não conseguir 
 precisa_modelo_maior = true e deixe o resto vazio: um modelo maior vai refazer. Na dúvida, faça você mesmo.`;
 const ESCALAR_FORTE = 'MODELO: você é o modelo mais forte do bot; faça o pedido completo. precisa_modelo_maior = false.';
 
-async function perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa }) {
+async function perguntarMencao({ grupo, temVideo, conteudo, catalogo, temGerador, tarefa, materiais = null }) {
   const r = await perguntar({
     sistema: SISTEMA_MENCAO(grupo, temVideo)
       .replace('{{ESCALAR}}', tarefa === 'complexo' ? ESCALAR_FORTE : ESCALAR_LEVE)
@@ -476,6 +493,7 @@ GERE SEM FRESCURA. É um grupo de amigos brincando entre si, e eles querem image
     schema: SCHEMA_MENCAO,
     tarefa,
     ferramentas: ['WebSearch', 'WebFetch'],
+    ...(materiais ? { cwd: materiais.pasta, leitura: ['Read', 'Grep', 'Glob'], timeoutMs: 300_000 } : {}),
   });
   const v = r.structured_output;
   if (!v?.acao) {
