@@ -314,8 +314,9 @@ const SCHEMA_MENCAO = {
         prompt: { type: 'string', description: 'origem gerada: descrição da imagem, em inglês e detalhada' },
         cor: { type: 'string', enum: ['branco', 'preto', 'amarelo', 'vermelho', 'azul', 'verde', 'rosa', 'roxo', 'laranja'] },
         recorte: { type: 'string', enum: ['inteira', 'quadrado'] },
+        efeitos: { type: 'array', description: 'filtros aplicados na imagem (origem imagem/web), na ordem; [] se nenhum', items: { type: 'string', enum: ['inverter_cores', 'preto_e_branco', 'sepia', 'espelhar', 'virar_de_cabeca_pra_baixo', 'girar_90', 'desfocar', 'pixelar', 'saturar', 'brilho_alto', 'escurecer'] } },
       },
-      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte'],
+      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte', 'efeitos'],
       additionalProperties: false,
     },
     anexos: {
@@ -359,9 +360,13 @@ Alguém te marcou (@) ou respondeu uma mensagem sua. Decida a ação.
 MARCAR PESSOAS: para marcar alguém, escreva "@" + o número dela exatamente como aparece (ex: "@45376446971961"),
 usando a lista "Pessoas do grupo" ou o "@número" que veio na mensagem. Se pedirem para marcar alguém, marque.
 
-NA DÚVIDA, PERGUNTE: se não der para saber o que a pessoa quer (qual vídeo, qual imagem, que texto
-vai na figurinha, de quem é a regra...), não chute: use "responder" com uma pergunta curta e objetiva
-(e figurinha.fazer = false, anexos = []). Se der para entender pelo contexto, faça direto.
+ENTENDA ANTES DE PERGUNTAR: antes de perguntar qualquer coisa, procure a resposta no contexto: no FIO
+DA CONVERSA, na mensagem respondida, nas últimas mensagens do grupo e nas imagens anexadas. Pedidos
+curtos ("pode gerar", "faz", "manda de novo", "agora com X", "isso aí", "sim") quase sempre continuam
+algo dito antes: descubra o quê e FAÇA. Se você mesmo ofereceu uma opção e a pessoa aceitou, execute
+essa opção. Imagem anexada é a imagem de que estão falando: não peça para descreverem. Só pergunte
+(resposta curta e objetiva, com figurinha.fazer = false e anexos = []) se a informação realmente não
+estiver em lugar nenhum e um chute daria errado.
 
 FIGURINHA: se pedirem para fazer/gerar/transformar em figurinha (sticker), preencha "figurinha" com fazer = true:
   - origem "imagem": usa a imagem ou figurinha que veio junto (na mensagem ou na mensagem respondida).
@@ -378,7 +383,12 @@ ${TOM_MEME.replace(/^/gm, '    ')}
   Se pedirem texto escrito na imagem, use texto_cima/texto_baixo. recorte "quadrado" só se pedirem
   para cortar/centralizar; senão "inteira". Pedido de figurinha sem imagem e sem dizer o que é: pergunte.
   O "texto" da resposta vira a legenda curta do serviço (ex: "figurinha do Nicolas feita"). Se não for
-  figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira").
+  figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira", "efeitos": []).
+  EFEITOS: o bot aplica filtros DE VERDADE na imagem (origem imagem ou web, inclusive GIF): "efeitos" com
+  inverter_cores, preto_e_branco, sepia, espelhar, virar_de_cabeca_pra_baixo, girar_90, desfocar, pixelar,
+  saturar, brilho_alto, escurecer. "Inverte as cores e manda de novo" = figurinha origem imagem com
+  efeitos ["inverter_cores"]. Nunca diga que não consegue aplicar esses filtros, e não use a IA de imagem
+  para isso. Filtro que não está na lista: aí sim ofereça gerar uma versão nova com a IA de imagem.
 GERAR IMAGEM: {{GERAR}}
 
 PDF / DOCUMENTO: se pedirem para FAZER algo e mandar como PDF/arquivo/documento (resolver questões ou
@@ -469,7 +479,7 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '' }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '', fio = [] }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   if (materiais) {
     partes.push(`MATERIAIS DO GOOGLE CLASSROOM DO RAFA (baixados em texto na pasta atual; você PODE e DEVE ler com
@@ -506,6 +516,14 @@ Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o ace
     partes.push(leituraPedida
       ? `Pediram para você ler a conversa. Mensagens do grupo (mais antigas primeiro, com horário):\n${historico.join('\n')}`
       : `Últimas mensagens do grupo (com horário), só para contexto:\n${historico.join('\n')}`);
+  }
+  if (fio.length) {
+    partes.push(`FIO DA CONVERSA (cadeia de respostas que levou até aqui, da mais antiga para a mais recente;
+cada mensagem respondia a anterior):
+${fio.join('\n')}
+Use esse fio como contexto do pedido: o que foi pedido antes, de qual imagem se fala, o que você já
+ofereceu fazer ("pode gerar" = faça o que você ofereceu). Se veio imagem anexada, ela é a imagem do fio:
+use-a e NUNCA diga que não vê a imagem nem peça para descreverem.`);
   }
   if (citada) partes.push(`A mensagem de ${autor} responde a esta mensagem:\n${citada}`);
   if (!pedido?.trim() && citada) {

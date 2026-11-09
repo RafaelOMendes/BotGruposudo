@@ -131,6 +131,45 @@ export async function figurinhaDeImagem(buffer, { cima = '', baixo = '', recorte
     .toBuffer();
 }
 
+/** Aplica filtros numa imagem parada (antes de virar figurinha). Devolve PNG. */
+export async function aplicarEfeitos(buffer, efeitos = []) {
+  if (!efeitos?.length) return buffer;
+  let img = sharp(buffer, { animated: false }).ensureAlpha();
+  for (const e of efeitos) {
+    if (e === 'inverter_cores') img = img.negate({ alpha: false });
+    else if (e === 'preto_e_branco') img = img.grayscale();
+    else if (e === 'sepia') img = img.recomb([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]]);
+    else if (e === 'espelhar') img = img.flop();
+    else if (e === 'virar_de_cabeca_pra_baixo') img = img.flip();
+    else if (e === 'desfocar') img = img.blur(6);
+    else if (e === 'saturar') img = img.modulate({ saturation: 2 });
+    else if (e === 'brilho_alto') img = img.modulate({ brightness: 1.4 });
+    else if (e === 'escurecer') img = img.modulate({ brightness: 0.6 });
+    else if (e === 'girar_90' || e === 'pixelar') {
+      // rotate/resize em cadeia no sharp precisam de um buffer intermediário
+      const meio = await img.png().toBuffer();
+      const { width: w, height: h } = await sharp(meio).metadata();
+      img = e === 'girar_90'
+        ? sharp(meio).rotate(90)
+        : sharp(await sharp(meio).resize(Math.max(8, Math.round(w / 16)), Math.max(8, Math.round(h / 16))).png().toBuffer())
+          .resize(w, h, { kernel: 'nearest' });
+    }
+    img = sharp(await img.png().toBuffer()); // cada filtro em cima do resultado do anterior
+  }
+  return img.png().toBuffer();
+}
+
+/** Os mesmos filtros como filtro do ffmpeg (figurinha animada). */
+export function filtroFfmpeg(efeitos = []) {
+  const mapa = {
+    inverter_cores: 'negate', preto_e_branco: 'hue=s=0', sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+    espelhar: 'hflip', virar_de_cabeca_pra_baixo: 'vflip', girar_90: 'transpose=1', desfocar: 'boxblur=6',
+    pixelar: 'scale=iw/16:ih/16,scale=iw*16:ih*16:flags=neighbor', saturar: 'eq=saturation=2',
+    brilho_alto: 'eq=brightness=0.15', escurecer: 'eq=brightness=-0.2',
+  };
+  return (efeitos || []).map((e) => mapa[e]).filter(Boolean).join(',');
+}
+
 /** Camada PNG 512×512 transparente só com o texto (cima/baixo), para pôr sobre figurinha animada. */
 export async function camadaDeTexto({ cima = '', baixo = '' } = {}) {
   if (!cima.trim() && !baixo.trim()) return null;

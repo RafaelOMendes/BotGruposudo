@@ -31,10 +31,12 @@ import makeWASocket, {
 import { avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
-import { camadaDeTexto, catalogoParaPrompt, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
+import { aplicarEfeitos, camadaDeTexto, catalogoParaPrompt, filtroFfmpeg, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { gerarPdf } from './pdf.mjs';
+import { decifrarEdicao, guardarSegredo, ligarDiagnostico } from './edicoes.mjs';
+ligarDiagnostico((t) => log(t)); // TEMPORÁRIO: diagnóstico das edições
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -209,9 +211,21 @@ function ehDe(m, { ids, remetente }) {
 // Mensagens que o bot enviou, para reenviar quando algum aparelho (ex: iPhone) pedir retry.
 const enviadas = new Map();
 function guardarEnviada(msg) {
-  if (!msg?.key?.id) return;
+  if (!msg?.key?.id) return msg;
   enviadas.set(msg.key.id, msg.message);
   if (enviadas.size > 200) enviadas.delete(enviadas.keys().next().value);
+  guardarMensagem(msg, 'Bot');
+  return msg;
+}
+
+// Mensagens recentes do grupo (só a mensagem em si: texto, quem mandou, a quem respondeu e a
+// referência da mídia; nada baixado). Servem para "puxar o fio" das respostas: a mensagem respondida,
+// a que ela respondia, e assim por diante, para o bot não perder o contexto.
+const mensagensGuardadas = new Map(); // id -> { key, message, nome }
+function guardarMensagem(msg, nome) {
+  if (!msg?.key?.id || !msg.message) return;
+  mensagensGuardadas.set(msg.key.id, { key: msg.key, message: msg.message, nome: nome || '' });
+  if (mensagensGuardadas.size > 1500) mensagensGuardadas.delete(mensagensGuardadas.keys().next().value);
 }
 
 // ---------- página local com o QR (o terminal às vezes é estreito demais) ----------
@@ -374,8 +388,9 @@ async function iniciar() {
     }
 
     let veredito;
+    let buffer = null;
     if (ia) {
-      const buffer = await baixar(m);
+      buffer = await baixar(m);
       veredito = await avaliarNonsense(buffer, { autor: m.pushName || CONFIG.figurinha.remetente, tipo, catalogo: await catalogoParaPrompt() });
     } else {
       veredito = { nonsense: Math.random() < CONFIG.figurinha.chanceSemIA, motivo: 'sem claude CLI', resposta: 'padrao' };
@@ -390,7 +405,7 @@ async function iniciar() {
     if (veredito.resposta === 'meme' && veredito.meme_id) {
       try {
         const meme = await figurinhaDeMeme({ id: veredito.meme_id, cima: veredito.texto_cima, baixo: veredito.texto_baixo });
-        guardarEnviada(await sock.sendMessage(jid, { sticker: meme }, { quoted: m }));
+        guardarEnviada(await sock.sendMessage(jid, { sticker: meme }, { quoted: m }), [{ buffer: meme }, { buffer }]);
         log(`Meme ${veredito.meme_id} ("${veredito.texto_cima}" / "${veredito.texto_baixo}") enviado em resposta à ${tipo} de ${quem}.`);
         return;
       } catch (e) {
@@ -491,6 +506,31 @@ async function iniciar() {
       }
     }
 
+    // Puxa o fio: a mensagem respondida, a que ELA respondia, e assim por diante (até 10 níveis).
+    // Sem responder nada, mas continuando a conversa com o bot logo depois, o fio começa na última
+    // mensagem do bot para essa pessoa. A primeira imagem/GIF achada no caminho vai junto.
+    const fio = [];
+    let proximo = ctx?.stanzaId || null;
+    if (!proximo && !imagens.length && !animado) {
+      const r = ultimaRespostaBot.get(jid);
+      if (r?.msgId && r.autorId === jidNormalizedUser(autorId) && Date.now() - r.em < 10 * 60e3) proximo = r.msgId;
+    }
+    const vistos = new Set();
+    for (let nivel = 0; proximo && nivel < 10 && !vistos.has(proximo); nivel++) {
+      vistos.add(proximo);
+      const guardada = mensagensGuardadas.get(proximo);
+      if (nivel > 0 || !ctx?.stanzaId) {
+        if (!guardada) break; // o fio sai do que o bot viu desde que ligou
+        const quem = guardada.key.fromMe ? 'você (o bot)' : guardada.nome || 'alguém';
+        fio.unshift(`${quem}: ${resumo(conteudo(guardada)) || '[mensagem]'}`);
+        if (!imagens.length && !animado) {
+          try { await pegarMidia(conteudo(guardada), guardada); } catch (e) { log('Não deu para baixar a mídia do fio:', e.message); }
+        }
+      }
+      proximo = contextoDa(conteudo(guardada || { message: ctx?.quotedMessage || {} }))?.stanzaId || null;
+    }
+    if (fio.length) log(`Marcação de ${autor}: puxei ${fio.length} mensagem(ns) do fio de respostas${imagens.length || animado ? ' (com imagem)' : ''}.`);
+
     const { hist, leituraPedida } = historicoPara(jid, pedido);
     log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${imagens.length ? ` (+${imagens.length} imagem)` : ''}${leituraPedida ? ` (lendo ${hist.length} mensagens)` : ''}`);
 
@@ -525,7 +565,7 @@ async function iniciar() {
       return interpretarMencao({
         entregas,
         materiais,
-        grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid),
+        grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid), fio,
         animacao: animado ? (animado.ext === 'webp' ? 'uma figurinha animada' : animado.gif ? 'um GIF' : 'um vídeo') : '',
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
         pessoas: pessoasParaPrompt(jid),
@@ -651,13 +691,17 @@ async function iniciar() {
       if (anexos.length && 'caption' in anexos[0] && resposta && resposta.length <= 1000) {
         anexos[0].caption = resposta;
         if (mentions.length) anexos[0].mentions = mentions;
-      } else if (resposta) guardarEnviada(await sock.sendMessage(jid, { text: resposta, mentions }, { quoted: m }));
-      for (const [i, anexo] of anexos.entries()) {
-        guardarEnviada(await sock.sendMessage(jid, anexo, i === 0 ? { quoted: m } : {}));
       }
-      if (figurinhaPronta) guardarEnviada(await sock.sendMessage(jid, { sticker: figurinhaPronta }, { quoted: m }));
+      let ultimaId = null;
+      if (!(anexos.length && 'caption' in anexos[0] && anexos[0].caption) && resposta) {
+        ultimaId = guardarEnviada(await sock.sendMessage(jid, { text: resposta, mentions }, { quoted: m }))?.key?.id || ultimaId;
+      }
+      for (const [i, anexo] of anexos.entries()) {
+        ultimaId = guardarEnviada(await sock.sendMessage(jid, anexo, i === 0 ? { quoted: m } : {}))?.key?.id || ultimaId;
+      }
+      if (figurinhaPronta) ultimaId = guardarEnviada(await sock.sendMessage(jid, { sticker: figurinhaPronta }, { quoted: m }))?.key?.id || ultimaId;
       registrar(jid, 'Bot', resposta || '[anexo]');
-      ultimaRespostaBot.set(jid, { autorId: jidNormalizedUser(autorId), em: Date.now(), n: contadorMsgs.get(jid) || 0 });
+      ultimaRespostaBot.set(jid, { autorId: jidNormalizedUser(autorId), em: Date.now(), n: contadorMsgs.get(jid) || 0, msgId: ultimaId });
       log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}${figurinhaPronta ? ' + figurinha' : ''}`);
     };
     const decisao = filaClaude.then(decidir);
@@ -714,17 +758,17 @@ async function iniciar() {
     const textos = { cima: f.texto_cima || '', baixo: f.texto_baixo || '' };
     if (f.origem === 'imagem') {
       // GIF / vídeo / figurinha animada → figurinha animada (texto por cima de todos os quadros).
-      if (animado) return figurinhaAnimada(animado.buffer, { ext: animado.ext, camada: await camadaDeTexto(textos) });
+      if (animado) return figurinhaAnimada(animado.buffer, { ext: animado.ext, camada: await camadaDeTexto(textos), filtro: filtroFfmpeg(f.efeitos) });
       if (!imagens.length) throw new Error('não veio imagem junto; manda a imagem (ou responde ela) pedindo a figurinha');
-      return figurinhaDeImagem(imagens[0], { ...textos, recorte: f.recorte });
+      return figurinhaDeImagem(await aplicarEfeitos(imagens[0], f.efeitos), { ...textos, recorte: f.recorte });
     }
     if (f.origem === 'web') {
       if (!f.url) throw new Error('não achei imagem para usar');
       const { buffer, mime } = await baixarMidiaDaWeb(f.url);
       if (mime.startsWith('video/') || await ehAnimada(buffer)) {
-        return figurinhaAnimada(buffer, { ext: mime.includes('gif') ? 'gif' : mime.includes('webp') ? 'webp' : 'mp4', camada: await camadaDeTexto(textos) });
+        return figurinhaAnimada(buffer, { ext: mime.includes('gif') ? 'gif' : mime.includes('webp') ? 'webp' : 'mp4', camada: await camadaDeTexto(textos), filtro: filtroFfmpeg(f.efeitos) });
       }
-      return figurinhaDeImagem(buffer, { ...textos, recorte: f.recorte });
+      return figurinhaDeImagem(await aplicarEfeitos(buffer, f.efeitos), { ...textos, recorte: f.recorte });
     }
     if (f.origem === 'meme') return figurinhaDeMeme({ id: f.meme_id, ...textos });
     if (f.origem === 'gerada') {
@@ -851,6 +895,12 @@ async function iniciar() {
   }
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // Guarda o segredo de cada mensagem: é com ele que se abre uma edição dela depois.
+    for (const m of messages) {
+      if (!isJidGroup(m.key.remoteJid || '')) continue;
+      guardarSegredo(m);
+      if (!m.key.fromMe) guardarMensagem(m, m.pushName); // as do bot entram pelo guardarEnviada
+    }
     if (type !== 'notify') return; // 'append' = histórico sincronizado
     for (const m of messages) {
       try {
@@ -858,7 +908,7 @@ async function iniciar() {
         if (!isJidGroup(jid)) continue;
         const edicao = edicaoDe(m);
         if (edicao) {
-          await tratarEdicao({ ...m.key, id: edicao.id }, edicao.message, m.pushName, 'mensagem');
+          if (edicao.message) await tratarEdicao({ ...m.key, id: edicao.id }, edicao.message, m.pushName, 'mensagem');
           continue;
         }
         registrar(jid, m.key.fromMe ? 'Bot' : m.pushName || digitos(m.key.participant || ''), resumo(conteudo(m)));
@@ -898,6 +948,13 @@ async function iniciar() {
 
   /** Se a mensagem é uma edição, devolve { id original, conteúdo novo }. */
   function edicaoDe(msg) {
+    // Formato novo: edição criptografada (o Baileys não abre; o edicoes.mjs abre).
+    const cifrada = decifrarEdicao(msg);
+    if (cifrada?.message) return cifrada;
+    if (cifrada?.erro) {
+      log(`Edição de ${msg.pushName || 'alguém'} não lida: ${cifrada.erro}.`);
+      return { id: cifrada.id, message: null };
+    }
     const raw = msg.message || {};
     const p = raw.protocolMessage || raw.editedMessage?.message?.protocolMessage || conteudo(msg).protocolMessage;
     if (p?.editedMessage && p.key?.id) return { id: p.key.id, message: p.editedMessage };

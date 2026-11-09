@@ -368,7 +368,7 @@ export async function ehAnimada(buffer) {
  * Figurinha ANIMADA (WebP 512×512, até ~6 s, cabendo em ~500 KB) a partir de GIF, vídeo curto ou
  * figurinha animada. `camada`: PNG 512×512 transparente com texto, posto por cima de todos os quadros.
  */
-export async function figurinhaAnimada(buffer, { ext = '', camada = null } = {}) {
+export async function figurinhaAnimada(buffer, { ext = '', camada = null, filtro = '' } = {}) {
   if (!ffmpeg) throw new Error('o ffmpeg não está instalado, não dá para fazer figurinha animada');
   // O ffmpeg não lê WebP animado: o sharp converte para GIF antes.
   if (ext === 'webp' || buffer.subarray(8, 12).toString() === 'WEBP') {
@@ -386,7 +386,7 @@ export async function figurinhaAnimada(buffer, { ext = '', camada = null } = {})
     ];
     let ultimo = null;
     for (const { fps, q, t } of tentativas) {
-      const base = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0`;
+      const base = `${filtro ? filtro + ',' : ''}fps=${fps},scale=512:512:force_original_aspect_ratio=decrease,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0`;
       await rodar(ffmpeg, [
         '-y', '-t', String(t), '-i', entrada,
         ...(camada ? ['-i', 'texto.png', '-filter_complex', `[0:v]${base}[b];[b][1:v]overlay=0:0[v]`, '-map', '[v]'] : ['-vf', base]),
