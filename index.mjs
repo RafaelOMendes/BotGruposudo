@@ -38,7 +38,7 @@ import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { gerarPdf } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
-import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
+import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -846,6 +846,20 @@ async function iniciar() {
               resposta = falhaAmigavel('figurinha');
               registrar(jid, 'Bot (nota interna)', `a figurinha não saiu; prompt usado: ${v.figurinha.prompt}`);
             } else resposta = `Não consegui fazer a figurinha: ${e.message}.`; // ex: "manda a imagem junto"
+          }
+        }
+
+        // Figurinha → imagem (ou GIF, se for animada): o contrário da figurinha.
+        if (v.acao === 'responder' && v.figurinha_para_imagem && !figurinhaPronta) {
+          try {
+            const animada = animado?.ext === 'webp';
+            if (!imagens.length && !animada) throw new Error('manda (ou responde) a figurinha junto com o pedido');
+            anexos.unshift({ pronto: await figurinhaParaMidia(animada ? animado.buffer : imagens[0], { animada }) });
+            servico = animada ? 'Figurinha em GIF' : 'Figurinha em imagem';
+            log(`Figurinha virou ${animada ? 'GIF' : 'imagem'} para ${autor}.`);
+          } catch (e) {
+            log(`Não deu para converter a figurinha (${e.message}).`);
+            resposta = `Não consegui converter a figurinha: ${e.message}.`;
           }
         }
 

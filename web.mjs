@@ -403,6 +403,33 @@ export async function figurinhaAnimada(buffer, { ext = '', camada = null, filtro
   }
 }
 
+/**
+ * O contrário da figurinha: figurinha parada vira foto (JPEG, fundo branco no lugar do transparente);
+ * figurinha animada vira GIF do WhatsApp (mp4 sem áudio tocado em loop). Devolve o conteúdo para o sendMessage.
+ */
+export async function figurinhaParaMidia(buffer, { animada = false } = {}) {
+  if (!animada) {
+    const foto = await sharp(buffer, { animated: false }).flatten({ background: '#ffffff' }).jpeg({ quality: 92 }).toBuffer();
+    return { image: foto, mimetype: 'image/jpeg', caption: '' };
+  }
+  if (!ffmpeg) throw new Error('o ffmpeg não está instalado, não dá para converter figurinha animada');
+  const gif = buffer.subarray(8, 12).toString() === 'WEBP' ? await sharp(buffer, { animated: true }).gif().toBuffer() : buffer;
+  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-ff-'));
+  try {
+    fs.writeFileSync(path.join(pasta, 'in.gif'), gif);
+    await rodar(ffmpeg, [
+      '-y', '-i', 'in.gif',
+      // fundo branco onde era transparente; lados pares (o H.264 exige)
+      '-filter_complex', 'color=white[f];[f][0:v]scale2ref[f][v];[f][v]overlay=shortest=1,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p',
+      '-movflags', '+faststart', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-an',
+      'saida.mp4',
+    ], pasta, 2 * 60_000);
+    return { video: fs.readFileSync(path.join(pasta, 'saida.mp4')), mimetype: 'video/mp4', gifPlayback: true, caption: '' };
+  } finally {
+    try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ }
+  }
+}
+
 /** Compatibilidade: baixa só uma imagem (JPEG). */
 export async function baixarImagemDaWeb(url) {
   const { buffer } = await baixarBytes(url, LIMITE.imagem);

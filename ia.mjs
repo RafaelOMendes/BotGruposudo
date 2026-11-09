@@ -290,6 +290,7 @@ const SCHEMA_MENCAO = {
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
     regra_apagar_id: { type: 'string' },
     precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
+    figurinha_para_imagem: { type: 'boolean', description: 'true = pediram para transformar a figurinha anexada em imagem/foto normal (ou em GIF, se for animada)' },
     imagem_gerada: {
       type: 'object',
       description: 'imagem para a IA de imagem criar e o bot mandar (fazer=false se não pediram para gerar imagem)',
@@ -352,7 +353,7 @@ const SCHEMA_MENCAO = {
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
-    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento',
+    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem',
   ],
   additionalProperties: false,
 };
@@ -401,6 +402,11 @@ ${TOM_MEME.replace(/^/gm, '    ')}
   saturar, brilho_alto, escurecer. "Inverte as cores e manda de novo" = figurinha origem imagem com
   efeitos ["inverter_cores"]. Nunca diga que não consegue aplicar esses filtros, e não use a IA de imagem
   para isso. Filtro que não está na lista: aí sim ofereça gerar uma versão nova com a IA de imagem.
+FIGURINHA → IMAGEM: se pedirem para transformar/converter a figurinha em imagem, foto, png, jpg ou GIF
+  ("transforma essa figurinha em imagem", "manda como foto", "salva essa figurinha pra mim"), use
+  figurinha_para_imagem = true (e figurinha.fazer = false): o bot manda a figurinha anexada como foto
+  (ou como GIF, se ela for animada). Você CONSEGUE fazer isso: nunca diga que só faz o contrário. O
+  "texto" vira a legenda curta do serviço. Senão figurinha_para_imagem = false.
 GERAR IMAGEM: {{GERAR}}
 
 PDF / DOCUMENTO: se pedirem para FAZER algo e mandar como PDF/arquivo/documento (resolver questões ou
