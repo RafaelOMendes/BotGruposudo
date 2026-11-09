@@ -440,6 +440,26 @@ async function iniciar() {
   // O WhatsApp manda o histórico completo das conversas quando o aparelho é conectado (QR escaneado).
   // Tudo o que vier de grupo é salvo junto com as mensagens recentes: vira contexto e fio de respostas.
   // (Pedir lotes antigos sob demanda foi testado: o celular desta conta responde sempre vazio.)
+  // Os nomes dos contatos vêm pelo número de telefone, mas no grupo cada pessoa aparece pelo LID:
+  // liga os dois pela lista de participantes (e pelo mapa LID↔número do WhatsApp).
+  async function ligarNomesDosGrupos() {
+    const grupos = await sock.groupFetchAllParticipating().catch(() => ({}));
+    let ligados = 0;
+    for (const meta of Object.values(grupos)) {
+      for (const p of meta.participants || []) {
+        const ids = [p.id, p.phoneNumber, p.lid].filter(Boolean);
+        if (!ids.some((i) => i.endsWith('@s.whatsapp.net'))) {
+          const pn = await sock.signalRepository?.lidMapping?.getPNForLID?.(p.id).catch(() => null);
+          if (pn) ids.push(pn);
+        }
+        const nome = nomeDaPessoa(...ids);
+        if (!nome) continue;
+        for (const i of ids) if (!nomeDaPessoa(i)) { lembrarNome(i, nome); ligados++; }
+      }
+    }
+    if (ligados) log(`Nomes: ${ligados} identificador(es) de participantes ligados a um nome.`);
+  }
+
   let historicoRecebido = 0;
   sock.ev.on('messaging-history.set', ({ messages = [], contacts = [], syncType, progress }) => {
     for (const c of contacts) {
@@ -457,6 +477,7 @@ async function iniciar() {
     historicoRecebido += salvas;
     log(`Histórico do WhatsApp (tipo ${syncType}${progress != null ? `, ${progress}%` : ''}): +${salvas} mensagens de grupo (total ${historicoRecebido}).`);
     salvarMensagens();
+    ligarNomesDosGrupos().catch(() => {});
   });
 
   sock.ev.on('groups.update', (updates) => updates.forEach((u) => groupCache.del(u.id)));
@@ -491,6 +512,8 @@ async function iniciar() {
       log(`Gerador de imagem (ComfyUI): ${geradorOk ? `pronto em ${CONFIG.gerador.pasta}` : 'desligado/não instalado'}.`);
       log(`Marcações (@) da conta ${ids.join(' / ')}: ${CONFIG.mencao.ativo && ia ? 'o Claude responde' : 'desligadas'}.`);
       log(`Entregas (Moodle/Classroom): ${local.entregas?.ativo && ia ? 'avisos às 12h, 20h e 22h' : 'desligadas'}.`);
+      // depois do histórico chegar: liga os nomes (por número) aos participantes (por LID)
+      setTimeout(() => ligarNomesDosGrupos().catch((e) => log('Nomes: erro', e.message)), 30_000);
     }
     if (connection === 'close') {
       conectado = false;
