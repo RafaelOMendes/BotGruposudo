@@ -38,8 +38,8 @@ function pagina(titulo, corpo) {
   h3 { font-size: 12pt; margin: 4mm 0 1.5mm; }
   p, li { margin: 1.2mm 0; }
   ol, ul { padding-left: 6mm; }
-  .questao { break-inside: avoid; margin: 0 0 4mm; }
-  .resposta { font-weight: 600; }
+  .questao { break-inside: avoid; break-after: avoid; margin: 4.5mm 0 0.8mm; }
+  .resposta { margin-top: 0; }
   table { border-collapse: collapse; width: 100%; margin: 2mm 0; break-inside: avoid; }
   th, td { border: 1px solid #999; padding: 1.5mm 2mm; text-align: left; vertical-align: top; }
   th { background: #eee; }
