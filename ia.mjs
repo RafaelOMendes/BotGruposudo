@@ -458,9 +458,18 @@ Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o ace
       : `Últimas mensagens do grupo (com horário), só para contexto:\n${historico.join('\n')}`);
   }
   if (citada) partes.push(`A mensagem de ${autor} responde a esta mensagem:\n${citada}`);
-  partes.push(respondeuBot
-    ? `${autor} respondeu uma mensagem sua e disse:\n${pedido || '(sem texto)'}`
-    : `${autor} te marcou e disse:\n${pedido || '(só te marcou, sem texto)'}`);
+  if (!pedido?.trim() && citada) {
+    // Marcou o bot sem escrever nada, respondendo uma mensagem: o pedido é o que está escrito nela.
+    partes.push(`${autor} te marcou SEM escrever nada, respondendo a mensagem acima. Isso quer dizer: "faça o que
+essa mensagem pede". Trate o texto dela como o pedido de ${autor} e EXECUTE (pergunta → responda; pedido de
+PDF, figurinha, imagem, vídeo, pesquisa, meme... → faça, com os mesmos campos de sempre). Não pergunte o que
+${autor} quer nem comente que veio sem texto. Só se a mensagem citada não pedir nada (ex: uma foto ou um
+comentário solto), reaja a ela no tom da conversa.`);
+  } else {
+    partes.push(respondeuBot
+      ? `${autor} respondeu uma mensagem sua e disse:\n${pedido || '(sem texto)'}`
+      : `${autor} te marcou e disse:\n${pedido || '(só te marcou, sem texto)'}`);
+  }
   if (imagens.length) partes.push(`(${imagens.length} imagem(ns) anexada(s) acima.)`);
   const conteudo = await conteudoCom(imagens, partes.join('\n\n'));
 
