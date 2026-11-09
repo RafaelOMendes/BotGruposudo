@@ -856,6 +856,11 @@ async function iniciar() {
       try {
         const jid = m.key.remoteJid;
         if (!isJidGroup(jid)) continue;
+        const edicao = edicaoDe(m);
+        if (edicao) {
+          await tratarEdicao({ ...m.key, id: edicao.id }, edicao.message, m.pushName, 'mensagem');
+          continue;
+        }
         registrar(jid, m.key.fromMe ? 'Bot' : m.pushName || digitos(m.key.participant || ''), resumo(conteudo(m)));
         lembrarPessoa(jid, m);
         if (!m.key.fromMe && resumo(conteudo(m))) contadorMsgs.set(jid, (contadorMsgs.get(jid) || 0) + 1);
@@ -885,24 +890,47 @@ async function iniciar() {
     }
   });
 
-  // Mensagem editada que passou a marcar o bot: responde, se ainda não respondeu (nem está respondendo).
+  // ---------- mensagem editada que passou a marcar o bot ----------
+  // A edição chega de dois jeitos (conforme a versão do WhatsApp/Baileys): como mensagem nova com um
+  // protocolMessage MESSAGE_EDIT dentro (às vezes embrulhado em editedMessage), e como messages.update.
+  // Os dois passam por aqui; o primeiro que chegar responde.
+  const edicoesVistas = new Set();
+
+  /** Se a mensagem é uma edição, devolve { id original, conteúdo novo }. */
+  function edicaoDe(msg) {
+    const raw = msg.message || {};
+    const p = raw.protocolMessage || raw.editedMessage?.message?.protocolMessage || conteudo(msg).protocolMessage;
+    if (p?.editedMessage && p.key?.id) return { id: p.key.id, message: p.editedMessage };
+    return null;
+  }
+
+  async function tratarEdicao(key, editada, pushName, origem) {
+    const jid = key.remoteJid;
+    if (key.fromMe || !isJidGroup(jid) || !CONFIG.mencao.ativo || !ia) return;
+    const autorId = jidNormalizedUser(key.participant || '');
+    const nome = pushName || conhecidos.get(jid)?.get(digitos(autorId)) || digitos(autorId);
+    const m = { key, message: editada, pushName: nome, messageTimestamp: Date.now() / 1000 };
+    const texto = textoDa(m);
+    const chave = `${key.id}|${texto}`;
+    if (edicoesVistas.has(chave)) return; // a mesma edição pelo outro caminho
+    edicoesVistas.add(chave);
+    if (edicoesVistas.size > 300) edicoesVistas.delete(edicoesVistas.values().next().value);
+    const marcou = meMarcaram(m);
+    log(`Edição de ${nome} (${origem}): "${texto.slice(0, 80)}" → ${marcou ? 'marca o bot' : 'não marca o bot'}`);
+    if (!marcou) return;
+    if (jaRespondidas.has(key.id)) {
+      log(`A mensagem editada de ${nome} já foi (ou está sendo) respondida.`);
+      return;
+    }
+    registrar(jid, nome, resumo(conteudo(m)));
+    await responderMarcacao(m, jid, await metadadosGrupo(jid));
+  }
+
   sock.ev.on('messages.update', async (updates) => {
     for (const { key, update } of updates) {
       try {
         const editada = update?.message?.editedMessage?.message;
-        if (!editada || key.fromMe || !isJidGroup(key.remoteJid) || !CONFIG.mencao.ativo || !ia) continue;
-        const jid = key.remoteJid;
-        const autorId = jidNormalizedUser(key.participant || '');
-        const nome = conhecidos.get(jid)?.get(digitos(autorId));
-        const m = { key, message: editada, pushName: nome, messageTimestamp: update.messageTimestamp || Date.now() / 1000 };
-        if (!meMarcaram(m)) continue;
-        if (jaRespondidas.has(key.id)) {
-          log(`${nome || 'alguém'} editou uma mensagem que marca o bot, mas ela já foi (ou está sendo) respondida.`);
-          continue;
-        }
-        log(`${nome || 'alguém'} editou uma mensagem para marcar o bot: "${textoDa(m).slice(0, 80)}"`);
-        registrar(jid, nome || digitos(autorId), resumo(conteudo(m)));
-        await responderMarcacao(m, jid, await metadadosGrupo(jid));
+        if (editada) await tratarEdicao(key, editada, null, 'update');
       } catch (err) {
         log('Erro ao processar mensagem editada:', err.stack || err);
       }
