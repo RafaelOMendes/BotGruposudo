@@ -515,7 +515,8 @@ Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o ace
   if (historico.length) {
     partes.push(leituraPedida
       ? `Pediram para você ler a conversa. Mensagens do grupo (mais antigas primeiro, com horário):\n${historico.join('\n')}`
-      : `Últimas mensagens do grupo (com horário), só para contexto:\n${historico.join('\n')}`);
+      : `Últimas ${historico.length} mensagens do grupo (mais antigas primeiro, com horário). Use para entender o
+contexto: de quem e do que estão falando, o que já foi pedido e respondido:\n${historico.join('\n')}`);
   }
   if (fio.length) {
     partes.push(`FIO DA CONVERSA (cadeia de respostas que levou até aqui, da mais antiga para a mais recente;

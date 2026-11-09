@@ -85,9 +85,9 @@ const CONFIG = {
     // Intervalo mínimo entre respostas para a mesma pessoa.
     intervaloSeg: local.mencao?.intervaloSeg ?? 10,
     // Quantas mensagens recentes do grupo vão como contexto.
-    historico: local.mencao?.historico ?? 8,
+    historico: local.mencao?.historico ?? 100,
     // Quando pedem para ler/resumir a conversa ("lê aí", "o que o fulano falou?"), vai até este tanto.
-    historicoLeitura: local.mencao?.historicoLeitura ?? 60,
+    historicoLeitura: local.mencao?.historicoLeitura ?? 200,
   },
 };
 
@@ -541,7 +541,7 @@ async function iniciar() {
       }
     }
 
-    // Puxa o fio: a mensagem respondida, a que ELA respondia, e assim por diante (até 10 níveis).
+    // Puxa o fio: a mensagem respondida, a que ELA respondia, e assim por diante, até acabarem os elos.
     // Sem responder nada, mas continuando a conversa com o bot logo depois, o fio começa na última
     // mensagem do bot para essa pessoa. A primeira imagem/GIF achada no caminho vai junto.
     const fio = [];
@@ -551,13 +551,13 @@ async function iniciar() {
       if (r?.msgId && r.autorId === jidNormalizedUser(autorId) && Date.now() - r.em < 10 * 60e3) proximo = r.msgId;
     }
     const vistos = new Set();
-    for (let nivel = 0; proximo && nivel < 10 && !vistos.has(proximo); nivel++) {
+    for (let nivel = 0; proximo && nivel < 500 && !vistos.has(proximo); nivel++) {
       vistos.add(proximo);
       const guardada = mensagensGuardadas.get(proximo);
       if (nivel > 0 || !ctx?.stanzaId) {
         if (!guardada) break; // o fio sai do que o bot viu desde que ligou
         const quem = guardada.key.fromMe ? 'você (o bot)' : guardada.nome || 'alguém';
-        fio.unshift(`${quem}: ${semMeuArroba(resumo(conteudo(guardada))) || '[mensagem]'}`);
+        fio.unshift(`${quem}: ${semMeuArroba(resumo(conteudo(guardada))).replace(/\s+/g, ' ').slice(0, 600) || '[mensagem]'}`);
         if (!imagens.length && !animado) {
           try { await pegarMidia(conteudo(guardada), guardada); } catch (e) { log('Não deu para baixar a mídia do fio:', e.message); }
         }
