@@ -242,6 +242,7 @@ function salvarMensagens() {
 process.on('exit', salvarMensagens);
 function guardarMensagem(msg, nome) {
   if (!msg?.key?.id || !msg.message) return;
+  if (nome && !msg.key.fromMe) { lembrarNome(msg.key.participant, nome); lembrarNome(msg.key.participantAlt, nome); }
   const antes = mensagensGuardadas.get(msg.key.id);
   mensagensGuardadas.set(msg.key.id, {
     key: { ...msg.key },
@@ -278,6 +279,30 @@ function midiasRecentes(jid, donos, pedidoMsg) {
   }
   return leva.reverse(); // na ordem em que foram mandadas
 }
+
+// Nomes das pessoas (número ou LID -> nome). Mensagens antigas do histórico vêm sem nome: o nome sai
+// daqui (aprendido das mensagens ao vivo e dos contatos que o WhatsApp manda junto com o histórico).
+const ARQ_NOMES = path.join(DIR, '.nomes.json');
+const nomes = new Map((() => { try { return Object.entries(JSON.parse(fs.readFileSync(ARQ_NOMES, 'utf8'))); } catch { return []; } })());
+let timerNomes = null;
+const chaveNome = (id) => String(id || '').split('@')[0].split(':')[0];
+function lembrarNome(id, nome) {
+  const k = chaveNome(id);
+  if (!k || !nome || nomes.get(k) === nome) return;
+  nomes.set(k, nome);
+  timerNomes ??= setTimeout(() => {
+    timerNomes = null;
+    try { fs.writeFileSync(ARQ_NOMES, JSON.stringify(Object.fromEntries(nomes))); } catch { /* tenta na próxima */ }
+  }, 5000);
+}
+function nomeDaPessoa(...ids) {
+  for (const id of ids) {
+    const n = id && nomes.get(chaveNome(id));
+    if (n) return n;
+  }
+  return '';
+}
+for (const g of mensagensGuardadas.values()) if (g.nome && !g.key.fromMe) { lembrarNome(g.key.participant, g.nome); lembrarNome(g.key.participantAlt, g.nome); }
 
 // Cópia de verdade: ao responder uma mensagem, o Baileys APAGA o contextInfo (a quem ela respondia)
 // do objeto original. Sem cópia, o fio se partia em toda mensagem que o bot respondeu.
@@ -397,7 +422,12 @@ async function iniciar() {
   // Tudo o que vier de grupo é salvo junto com as mensagens recentes: vira contexto e fio de respostas.
   // (Pedir lotes antigos sob demanda foi testado: o celular desta conta responde sempre vazio.)
   let historicoRecebido = 0;
-  sock.ev.on('messaging-history.set', ({ messages = [], syncType, progress }) => {
+  sock.ev.on('messaging-history.set', ({ messages = [], contacts = [], syncType, progress }) => {
+    for (const c of contacts) {
+      const nome = c.notify || c.name || c.verifiedName;
+      lembrarNome(c.id, nome);
+      lembrarNome(c.lid, nome);
+    }
     let salvas = 0;
     for (const msg of messages) {
       if (!msg?.message || !isJidGroup(msg.key?.remoteJid || '')) continue;
@@ -620,7 +650,7 @@ async function iniciar() {
       const guardada = mensagensGuardadas.get(proximo);
       if (nivel > 0 || !ctx?.stanzaId) {
         if (!guardada) break; // o fio sai do que o bot viu desde que ligou
-        const quem = guardada.key.fromMe ? 'você (o bot)' : guardada.nome || 'alguém';
+        const quem = guardada.key.fromMe ? 'você (o bot)' : guardada.nome || nomeDaPessoa(guardada.key.participant, guardada.key.participantAlt) || 'alguém';
         fio.unshift(`${quem}: ${semMeuArroba(resumo(conteudo(guardada))).replace(/\s+/g, ' ').slice(0, 600) || '[mensagem]'}`);
         if (!imagens.length && !animado) {
           try { await pegarMidia(conteudo(guardada), guardada); } catch (e) { log('Não deu para baixar a mídia do fio:', e.message); }
@@ -848,6 +878,8 @@ async function iniciar() {
   const conhecidos = new Map(); // grupo -> Map(id -> nome)
   function lembrarPessoa(jid, m) {
     if (m.key.fromMe || !m.pushName) return;
+    lembrarNome(m.key.participant, m.pushName);
+    lembrarNome(m.key.participantAlt, m.pushName);
     const mapa = conhecidos.get(jid) || new Map();
     for (const id of [m.key.participant, m.key.participantAlt].filter(Boolean)) mapa.set(digitos(jidNormalizedUser(id)), m.pushName);
     conhecidos.set(jid, mapa);
@@ -1025,7 +1057,7 @@ async function iniciar() {
 
   /** As últimas `quantas` mensagens do grupo (fora a `semId`), mais antigas primeiro. */
   function historicoDoGrupo(jid, quantas, semId = null) {
-    const nomeDe = (g) => (g.key.fromMe ? 'Bot' : g.nome || conhecidos.get(jid)?.get(digitos(jidNormalizedUser(g.key.participant || ''))) || 'alguém');
+    const nomeDe = (g) => (g.key.fromMe ? 'Bot' : g.nome || nomeDaPessoa(g.key.participant, g.key.participantAlt) || 'alguém');
     const itens = [];
     for (const g of mensagensGuardadas.values()) {
       if (g.key.remoteJid !== jid || g.key.id === semId) continue;
