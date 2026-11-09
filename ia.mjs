@@ -393,6 +393,8 @@ diga o nome, a disciplina, o dia (e a hora) e quanto vale (a nota vem em "vale X
 como "PESO: 20 PONTOS"; se não houver, diga que não sabe a nota). Filtre pelo período que perguntaram
 (hoje, amanhã, esta semana, semana que vem...) usando a data de agora. Pule fóruns opcionais de dúvida
 ou de organização de grupos, a não ser que perguntem deles. Se não tiver nada no período, diga isso.
+Se perguntarem da aula ou da matéria de hoje, diga o que vence ou acontece hoje nessa lista; você não vê
+o conteúdo das aulas, só os prazos, então deixe isso claro sem dizer que está sem acesso.
 Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o acesso.`);
   }
   partes.push(`Regras ativas neste grupo (id | descrição):\n${regras || '(nenhuma)'}`);

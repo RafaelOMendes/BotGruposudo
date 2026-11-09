@@ -97,7 +97,7 @@ export async function buscarAtividades(cfg, log = console.log, { diasClassroom =
 }
 
 // ---------- perguntas no grupo ("tem trabalho semana que vem?") ----------
-export const PERGUNTA_ENTREGA = /\b(trabalh\w*|entreg\w*|prazos?|provas?|atividades?|tarefas?|question[aá]rios?|avalia[cç][aã]o|avalia[cç][oõ]es|moodle|classroom|deadline|vence\w*|li[cç][aã]o|exerc[ií]cios?|semin[aá]rios?|relat[oó]rios?)\b/i;
+export const PERGUNTA_ENTREGA = /\b(trabalh\w*|entreg\w*|prazos?|provas?|atividades?|tarefas?|question[aá]rios?|avalia[cç][aã]o|avalia[cç][oõ]es|moodle|classroom|deadline|vence\w*|li[cç][aã]o|exerc[ií]cios?|semin[aá]rios?|relat[oó]rios?|aulas?|mat[eé]rias?|disciplinas?|cadeiras?|facul\w*|notas?|pontos)\b/i;
 
 const cacheLista = { em: 0, texto: '' };
 const diaSemana = (d) => new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: '2-digit' }).format(d);
