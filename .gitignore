@@ -11,3 +11,5 @@ cookies.txt
 .classroom_token.json
 .entregas-estado.json
 .classroom_materiais/
+.mensagens-recentes.json
+.mensagens-recentes.json.tmp

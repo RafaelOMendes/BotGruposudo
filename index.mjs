@@ -21,6 +21,7 @@ import pino from 'pino';
 import NodeCache from '@cacheable/node-cache';
 import makeWASocket, {
   Browsers,
+  BufferJSON,
   DisconnectReason,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
@@ -220,12 +221,34 @@ function guardarEnviada(msg) {
 // Mensagens recentes do grupo (só a mensagem em si: texto, quem mandou, a quem respondeu e a
 // referência da mídia; nada baixado). Servem para "puxar o fio" das respostas: a mensagem respondida,
 // a que ela respondia, e assim por diante, para o bot não perder o contexto.
+// Ficam salvas em disco (.mensagens-recentes.json), para o fio não se perder quando o bot reinicia.
 const mensagensGuardadas = new Map(); // id -> { key, message, nome }
+const ARQ_MENSAGENS = path.join(DIR, '.mensagens-recentes.json');
+try {
+  for (const [id, v] of JSON.parse(fs.readFileSync(ARQ_MENSAGENS, 'utf8'), BufferJSON.reviver)) mensagensGuardadas.set(id, v);
+} catch { /* primeira vez, ou arquivo estragado: começa vazio */ }
+let timerSalvar = null;
+function salvarMensagens() {
+  clearTimeout(timerSalvar);
+  timerSalvar = null;
+  try {
+    fs.writeFileSync(ARQ_MENSAGENS + '.tmp', JSON.stringify([...mensagensGuardadas], BufferJSON.replacer));
+    fs.renameSync(ARQ_MENSAGENS + '.tmp', ARQ_MENSAGENS);
+  } catch (e) {
+    console.error('Não deu para salvar as mensagens recentes:', e.message);
+  }
+}
+process.on('exit', salvarMensagens);
 function guardarMensagem(msg, nome) {
   if (!msg?.key?.id || !msg.message) return;
+  mensagensGuardadas.delete(msg.key.id); // reinsere no fim (mais recente)
   mensagensGuardadas.set(msg.key.id, { key: msg.key, message: msg.message, nome: nome || '' });
-  if (mensagensGuardadas.size > 1500) mensagensGuardadas.delete(mensagensGuardadas.keys().next().value);
+  while (mensagensGuardadas.size > 1500) mensagensGuardadas.delete(mensagensGuardadas.keys().next().value);
+  timerSalvar ??= setTimeout(salvarMensagens, 5000); // junta várias mensagens numa gravação
 }
+
+// Número de um campo que pode vir como Long do protobuf (ou objeto {low, high} depois de salvo em JSON).
+const numero = (x) => (x && typeof x === 'object' ? (x.low >>> 0) + (x.high || 0) * 2 ** 32 : Number(x || 0));
 
 // ---------- página local com o QR (o terminal às vezes é estreito demais) ----------
 const PORTA_QR = Number(process.env.BOT_QR_PORT || 3999);
@@ -487,7 +510,7 @@ async function iniciar() {
         const b = await baixar(msg);
         imagens.push(b);
         if (!animado && conteudoMsg.stickerMessage?.isAnimated) animado = { buffer: b, ext: 'webp' };
-      } else if (conteudoMsg.videoMessage && !animado && Number(conteudoMsg.videoMessage.fileLength || 0) <= 25 * 1024 * 1024) {
+      } else if (conteudoMsg.videoMessage && !animado && numero(conteudoMsg.videoMessage.fileLength) <= 25 * 1024 * 1024) {
         animado = { buffer: await baixar(msg), ext: 'mp4', gif: !!conteudoMsg.videoMessage.gifPlayback };
       }
     };
@@ -531,7 +554,7 @@ async function iniciar() {
     if (fio.length) log(`Marcação de ${autor}: puxei ${fio.length} mensagem(ns) do fio de respostas${imagens.length || animado ? ' (com imagem)' : ''}.`);
 
     const { hist, leituraPedida } = historicoPara(jid, pedido);
-    log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${imagens.length ? ` (+${imagens.length} imagem)` : ''}${leituraPedida ? ` (lendo ${hist.length} mensagens)` : ''}`);
+    log(`${autor} marcou o bot: "${pedido.slice(0, 80)}"${citada ? ` (respondendo ${citada.slice(0, 60)})` : ''}${imagens.length ? ` (+${imagens.length} imagem)` : ''}${leituraPedida ? ` (lendo ${hist.length} mensagens)` : ''}`);
 
     // Pessoas marcadas na mensagem (fora o bot): viram os IDs do remetente se a pessoa criar uma regra.
     const outrosMarcados = (ctx?.mentionedJid || []).map(jidNormalizedUser).filter((j) => !meusIds().includes(j));
@@ -948,7 +971,12 @@ async function iniciar() {
   /** Se a mensagem é uma edição, devolve { id original, conteúdo novo }. */
   function edicaoDe(msg) {
     // Formato novo: edição criptografada (o Baileys não abre; o edicoes.mjs abre).
-    const cifrada = decifrarEdicao(msg);
+    const cifrada = decifrarEdicao(msg, (id) => {
+      // a original pode ter chegado antes do último reinício: o segredo também está nas mensagens salvas
+      const g = mensagensGuardadas.get(id);
+      const segredo = g?.message?.messageContextInfo?.messageSecret;
+      return segredo ? { segredo: typeof segredo === 'string' ? Buffer.from(segredo, 'base64') : Buffer.from(segredo), autores: [g.key.participant, g.key.participantAlt].filter(Boolean).map(jidNormalizedUser) } : null;
+    });
     if (cifrada?.message) return cifrada;
     if (cifrada?.erro) {
       log(`Edição de ${msg.pushName || 'alguém'} não lida: ${cifrada.erro}.`);

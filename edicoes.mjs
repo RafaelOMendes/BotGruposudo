@@ -34,12 +34,12 @@ function abrirGcm(chave32, iv, dados, aad) {
  * Se a mensagem é uma edição criptografada, devolve { id original, message: conteúdo novo }.
  * Devolve { id, erro } quando é edição mas não deu para abrir (ex: original chegou antes do bot ligar).
  */
-export function decifrarEdicao(m) {
+export function decifrarEdicao(m, buscarOriginal = null) {
   const s = m.message?.secretEncryptedMessage;
   if (!s || Number(s.secretEncType) !== proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT) return null;
   const id = s.targetMessageKey?.id;
   if (!id) return null;
-  const original = segredos.get(id);
+  const original = segredos.get(id) || buscarOriginal?.(id);
   if (!original) return { id, erro: 'não vi a mensagem original (chegou antes do bot ligar?)' };
   const editores = [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
   const payload = Buffer.from(s.encPayload);
