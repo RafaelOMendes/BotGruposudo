@@ -365,6 +365,7 @@ async function iniciar() {
   const { state, saveCreds } = await useMultiFileAuthState(path.join(DIR, '.baileys_auth'));
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
 
+  let codigoPedido = false;
   const sock = makeWASocket({
     version,
     auth: state,
@@ -413,6 +414,17 @@ async function iniciar() {
   sock.ev.on('group-participants.update', (u) => groupCache.del(u.id));
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    // Sem sessão e com "numeroBot" no config: também dá para conectar digitando um código no celular
+    // (WhatsApp > Aparelhos conectados > Conectar aparelho > Conectar com número de telefone).
+    if (qr && !state.creds.me && local.numeroBot && !codigoPedido) {
+      codigoPedido = true;
+      sock.requestPairingCode(String(local.numeroBot).replace(/\D/g, ''))
+        .then((codigo) => {
+          fs.writeFileSync(path.join(DIR, '.codigo-pareamento.txt'), codigo);
+          log(`Código de pareamento: ${codigo} (vale alguns minutos).`);
+        })
+        .catch((e) => log('Não deu para pedir o código de pareamento:', e.message));
+    }
     if (qr) {
       log('Escaneie o QR code abaixo no WhatsApp (Aparelhos conectados > Conectar aparelho):');
       qrcode.generate(qr, { small: true });
