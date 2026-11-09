@@ -248,6 +248,27 @@ function guardarMensagem(msg, nome) {
   timerSalvar ??= setTimeout(salvarMensagens, 5000); // junta várias mensagens numa gravação
 }
 
+/**
+ * Mídias (foto, álbum, GIF, vídeo, figurinha) que a pessoa mandou na última leva antes do pedido:
+ * vai voltando enquanto o intervalo entre uma e outra for de até 3 min (no máx. 10 min e 10 mídias).
+ */
+function midiasRecentes(jid, donos, pedidoMsg) {
+  const ate = numero(pedidoMsg.messageTimestamp) || Math.floor(Date.now() / 1000);
+  const delas = [...mensagensGuardadas.values()]
+    .filter((g) => g.key.remoteJid === jid && !g.key.fromMe && (g.em || 0) <= ate + 5 && (g.em || 0) >= ate - 600)
+    .filter((g) => [g.key.participant, g.key.participantAlt].filter(Boolean).map(jidNormalizedUser).some((x) => donos.includes(x)))
+    .filter((g) => { const c = conteudo(g); return c.imageMessage || c.stickerMessage || c.videoMessage; })
+    .sort((a, b) => (b.em || 0) - (a.em || 0));
+  const leva = [];
+  let anterior = ate;
+  for (const g of delas) {
+    if (anterior - (g.em || 0) > 180 || leva.length >= 10) break;
+    leva.push(g);
+    anterior = g.em || 0;
+  }
+  return leva.reverse(); // na ordem em que foram mandadas
+}
+
 // Cópia de verdade: ao responder uma mensagem, o Baileys APAGA o contextInfo (a quem ela respondia)
 // do objeto original. Sem cópia, o fio se partia em toda mensagem que o bot respondeu.
 function copiaDaMensagem(message) {
@@ -573,6 +594,10 @@ async function iniciar() {
     const outrosMarcados = (ctx?.mentionedJid || []).map(jidNormalizedUser).filter((j) => !meusIds().includes(j));
 
     const respondeuBot = !!(ctx?.participant && meusIds().includes(jidNormalizedUser(ctx.participant)));
+    // "Figurinha de cada imagem que mandei": de quem são as mídias (de quem foi respondido, se não for o bot).
+    const donoDasMidias = ctx?.participant && !respondeuBot
+      ? [jidNormalizedUser(ctx.participant)]
+      : [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
 
     // 1) Só a pergunta ao Claude entra na fila (uma por vez).
     const decidir = async () => {
@@ -658,6 +683,35 @@ async function iniciar() {
               registrar(jid, 'Bot (nota interna)', `a imagem não saiu; prompt usado: ${v.imagem_gerada.prompt}`);
             }
           }
+        }
+
+        // Várias figurinhas: uma para CADA mídia que a pessoa mandou nos últimos minutos, cada uma
+        // como um serviço próprio (responde a mídia de origem; se uma falhar, as outras saem).
+        if (v.acao === 'responder' && v.figurinha?.fazer && v.figurinha.varias && v.figurinha.origem === 'imagem') {
+          const fontes = midiasRecentes(jid, donoDasMidias, m);
+          if (!fontes.length) {
+            resposta = 'Não achei imagem, GIF ou vídeo seu dos últimos minutos para virar figurinha.';
+          } else {
+            let feitas = 0;
+            for (const g of fontes) {
+              try {
+                const c2 = conteudo(g);
+                const buffer = await baixar(g);
+                const anim = c2.videoMessage ? { buffer, ext: 'mp4' } : c2.stickerMessage?.isAnimated ? { buffer, ext: 'webp' } : null;
+                const fig = await montarFigurinha({ ...v.figurinha, origem: 'imagem' }, anim ? [] : [buffer], anim);
+                guardarEnviada(await sock.sendMessage(jid, { sticker: fig }, { quoted: g }));
+                feitas++;
+              } catch (e) {
+                log(`Figurinha de uma das mídias de ${autor} falhou (${e.message}).`);
+              }
+            }
+            log(`Figurinhas: ${feitas} de ${fontes.length} mídias de ${autor}.`);
+            servico = 'Figurinhas';
+            resposta = feitas === fontes.length
+              ? `${feitas} figurinha(s), uma para cada mídia.`
+              : `${feitas} de ${fontes.length} figurinhas saíram; ${fontes.length - feitas} não deu (mídia antiga ou grande demais).`;
+          }
+          v.figurinha.fazer = false; // já tratado aqui
         }
 
         // Figurinha pedida (de imagem mandada, da web, de meme, só texto ou gerada pela IA).

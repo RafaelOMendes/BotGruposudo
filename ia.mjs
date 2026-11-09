@@ -315,8 +315,9 @@ const SCHEMA_MENCAO = {
         cor: { type: 'string', enum: ['branco', 'preto', 'amarelo', 'vermelho', 'azul', 'verde', 'rosa', 'roxo', 'laranja'] },
         recorte: { type: 'string', enum: ['inteira', 'quadrado'] },
         efeitos: { type: 'array', description: 'filtros aplicados na imagem (origem imagem/web), na ordem; [] se nenhum', items: { type: 'string', enum: ['inverter_cores', 'preto_e_branco', 'sepia', 'espelhar', 'virar_de_cabeca_pra_baixo', 'girar_90', 'desfocar', 'pixelar', 'saturar', 'brilho_alto', 'escurecer'] } },
+        varias: { type: 'boolean', description: 'true = uma figurinha para CADA imagem/GIF/vídeo que a pessoa mandou nos últimos minutos ("de cada imagem", "de todas", "dessas")' },
       },
-      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte', 'efeitos'],
+      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte', 'efeitos', 'varias'],
       additionalProperties: false,
     },
     anexos: {
@@ -384,6 +385,9 @@ ${TOM_MEME.replace(/^/gm, '    ')}
   para cortar/centralizar; senão "inteira". Pedido de figurinha sem imagem e sem dizer o que é: pergunte.
   O "texto" da resposta vira a legenda curta do serviço (ex: "figurinha do Nicolas feita"). Se não for
   figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira", "efeitos": []).
+  VÁRIAS: se pedirem figurinha de várias mídias ("de cada imagem que mandei", "de todas", "dessas fotos",
+  "gif e vídeo também"), use origem "imagem" com varias = true: o bot junta TUDO que a pessoa mandou nos
+  últimos minutos (fotos, álbum, GIFs, vídeos, figurinhas) e faz uma figurinha para cada. Senão varias = false.
   EFEITOS: o bot aplica filtros DE VERDADE na imagem (origem imagem ou web, inclusive GIF): "efeitos" com
   inverter_cores, preto_e_branco, sepia, espelhar, virar_de_cabeca_pra_baixo, girar_90, desfocar, pixelar,
   saturar, brilho_alto, escurecer. "Inverte as cores e manda de novo" = figurinha origem imagem com
