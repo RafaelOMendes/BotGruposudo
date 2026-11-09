@@ -37,7 +37,7 @@ const LAYOUTS = {
   110133729: { cima: [0, 0, 0.5, 0.3], baixo: [0.5, 0, 0.5, 0.3], dica: 'cima = homem-aranha da esquerda, baixo = o da direita' },
   67452763: { cima: [0, 0, 0.5, 0.4], baixo: [0.5, 0, 0.5, 0.4], dica: 'cima = Lula Molusco sozinho, baixo = a diversão lá fora' },
   354700819: { cima: [0, 0.05, 0.42, 0.38], baixo: [0.55, 0.05, 0.45, 0.35], dica: 'cima = janela do triste, baixo = janela do feliz' },
-  148909805: { cima: [0, 0, 1, 0.4], baixo: null, dica: 'cima = a situação; baixo vazio' },
+  148909805: { cima: [0, 0, 1, 0.4], baixo: [0, 0.8, 1, 0.2], dica: 'cima = a situação, baixo = punchline curta (opcional)' },
   221578498: { cima: [0.06, 0.18, 0.36, 0.33], baixo: [0.5, 0.48, 0.5, 0.2], dica: 'cima = no túmulo (o que morreu), baixo = quem está feliz' },
 };
 

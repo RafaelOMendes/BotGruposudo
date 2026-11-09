@@ -154,6 +154,18 @@ texto_cima e texto_baixo curtos (até ~8 palavras cada) em português, no estilo
 (ex: Drake = cima o que ele rejeita, baixo o que ele prefere). O meme é uma resposta zoando.`;
 
 async function conteudoCom(imagens, texto) {
+// Só para o TEXTO DOS MEMES: bem mais ácido que o chat (que continua com o TOM normal).
+const TOM_MEME = `- Português do Brasil, linguagem de meme de grupo de amigos.
+- Aqui pode e deve ser ÁCIDO: sarcasmo, ironia pesada, deboche, humor negro leve, esculacho de amigo.
+  Mire em quem mandou a mensagem/figurinha ou no que foi dito: preguiça, atraso, nota baixa, vida
+  amorosa, ideia ruim, figurinha sem graça. A piada tem que doer um pouco e fazer o grupo rir.
+- Seja específico e inesperado; fuja do óbvio e do fofo (nada de "cérebro na cabeça, que é onde ele mora").
+  Punchline seca no texto_baixo, sem explicar a piada.
+- Palavrão pode, se deixar mais engraçado.
+- Limites que continuam valendo: nunca ataque raça, cor, religião, orientação sexual, deficiência ou
+  doença; nada de ameaça, nem de expor coisa realmente íntima ou séria de alguém.
+- Sem emoji no texto do meme.`;
+
   const c = [];
   for (const img of imagens.slice(0, 3)) c.push(await blocoImagem(img));
   c.push({ type: 'text', text: texto });
@@ -192,7 +204,7 @@ ${TEXTO_MEME}
 Se não for meme, deixe meme_id, texto_cima e texto_baixo vazios.
 
 Tom do texto do meme:
-${TOM}
+${TOM_MEME}
 ${SEGURANCA}
 
 Templates disponíveis (id | nome):
@@ -295,7 +307,9 @@ vai na figurinha, de quem é a regra...), não chute: use "responder" com uma pe
 FIGURINHA: se pedirem para fazer/gerar/transformar em figurinha (sticker), preencha "figurinha" com fazer = true:
   - origem "imagem": usa a imagem ou figurinha que veio junto (na mensagem ou na mensagem respondida).
   - origem "web": ache uma imagem na internet (URL https direta) do que pediram.
-  - origem "meme": um template da lista de memes, com texto_cima/texto_baixo.
+  - origem "meme": um template da lista de memes, com texto_cima/texto_baixo. O texto do MEME (só ele,
+    não o "texto" da resposta) segue este tom:
+${TOM_MEME.replace(/^/gm, '    ')}
   - origem "gerada": {{GERADA}}
   - origem "texto": figurinha só com o texto (campo "texto"), escolha uma "cor".
   Se pedirem texto escrito na imagem, use texto_cima/texto_baixo. recorte "quadrado" só se pedirem
@@ -578,7 +592,7 @@ export async function memeDeRegra({ grupo, autor, mensagem, instrucao, imagens =
 ${TEXTO_MEME}
 
 Tom:
-${TOM}
+${TOM_MEME}
 ${SEGURANCA}
 
 Templates disponíveis (id | nome):
