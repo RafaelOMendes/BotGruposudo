@@ -290,8 +290,9 @@ const SCHEMA_ADMIN = (descricao) => ({
     pessoas: { type: 'array', items: { type: 'string' }, description: 'números das pessoas (como aparecem em "Pessoas do grupo", sem @); adicionar: número com DDI e DDD (ex: 5551999998888); [] se não for com pessoas' },
     texto: { type: 'string', description: 'mudar_nome/mudar_descricao: o novo texto; senão ""' },
     tempo: { type: 'string', enum: ['', 'desligar', '24h', '7d', '90d'], description: 'mensagens_temporarias: duração; senão ""' },
+    mandar_historico: { type: 'boolean', description: 'adicionar: true = mandar no privado da pessoa as mensagens do grupo desde que ela saiu (como a função do WhatsApp de compartilhar o histórico); senão false' },
   },
-  required: ['acao', 'pessoas', 'texto', 'tempo'],
+  required: ['acao', 'pessoas', 'texto', 'tempo', 'mandar_historico'],
   additionalProperties: false,
 });
 
@@ -482,7 +483,8 @@ TIMER: se o pedido tiver tempo ("em 10 min", "daqui a meia hora", "às 18h", "de
 for para DEPOIS vai em "agendadas" (minutos a partir de agora; para um horário, calcule pela hora
 atual), e o que for para agora vai em "admin" como sempre. Ex: "remove e adiciona o Nicolas em 10 min"
 = admin remover AGORA + agendada adicionar em 10 min. "Remove o Nicolas daqui a 5 min" = só a agendada.
-"Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
+"Adiciona e manda o histórico" = admin adicionar com mandar_historico = true (o bot manda no privado
+da pessoa as mensagens desde que ela saiu: você CONSEGUE). "Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
 sozinho na hora: nunca diga que não consegue agendar. O "texto" da resposta confirma curto (ex:
 "Nicolas removido; volta em 10 min."). Sem tempo no pedido: agendadas = [].
 

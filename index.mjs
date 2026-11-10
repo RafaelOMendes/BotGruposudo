@@ -40,7 +40,7 @@ import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImag
 import { gerarPdf } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
-import { agendar, vencidas } from './agenda.mjs';
+import { agendar, pendentes, vencidas } from './agenda.mjs';
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -849,9 +849,13 @@ async function iniciar() {
             const minutos = Math.min(7 * 24 * 60, Math.max(0.25, Number(a.minutos) || 0));
             const admin = a.admin?.acao && a.admin.acao !== 'nenhuma' ? a.admin : null;
             if (!admin && !a.mensagem?.trim()) continue;
+            // Mesma ação para a mesma pessoa já agendada perto dessa hora (ex: duas pessoas pediram): não repete.
+            if (admin && pendentes(jid).some((p) => p.admin?.acao === admin.acao && Math.abs(p.quando - (Date.now() + minutos * 60e3)) < 5 * 60e3
+              && (p.admin.pessoas || []).join() === (admin.pessoas || []).join())) { feitas.push(`${descreverAcao(admin, meta2)} (já estava agendado)`); continue; }
             const quando = Date.now() + minutos * 60e3;
             const descricao = admin ? descreverAcao(admin, meta2) : 'aviso';
-            agendar({ jid, quando, admin, mensagem: a.mensagem || '', pedidoPor: autor, descricao });
+            // historico_desde: se for "adicionar e mandar o histórico", conta a partir do pedido.
+            agendar({ jid, quando, admin: admin ? { ...admin, historico_desde: Date.now() } : null, mensagem: a.mensagem || '', pedidoPor: autor, descricao });
             const hora = new Date(quando).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
             feitas.push(`${descricao} às ${hora}`);
             log(`Agendado por ${autor} para ${hora} (em ${minutos} min): ${admin ? admin.acao + (admin.pessoas?.length ? ` (${admin.pessoas.join(', ')})` : '') : ''}${a.mensagem ? ` mensagem "${a.mensagem.slice(0, 60)}"` : ''}.`);
@@ -1050,6 +1054,37 @@ async function iniciar() {
   }
 
   // ---------- funções de admin ----------
+  // Quando cada pessoa saiu do grupo (para mandar o que ela perdeu quando voltar).
+  const ARQ_SAIDAS = path.join(DIR, '.saidas.json');
+  let saidas = {};
+  try { saidas = JSON.parse(fs.readFileSync(ARQ_SAIDAS, 'utf8')); } catch { /* nenhuma */ }
+  function marcarSaida(jid, ids) {
+    for (const i of ids.filter(Boolean)) saidas[`${jid}|${digitos(jidNormalizedUser(i))}`] = Date.now();
+    try { fs.writeFileSync(ARQ_SAIDAS, JSON.stringify(saidas)); } catch { /* tenta na próxima */ }
+  }
+  /** Manda no privado as mensagens do grupo desde que a pessoa saiu (ou desde `desde`). */
+  async function mandarHistorico(jid, destino, desde, meta) {
+    // As mensagens guardadas têm a hora em SEGUNDOS (messageTimestamp); saídas e pedidos, em ms.
+    const inicio = Math.floor((saidas[`${jid}|${digitos(destino)}`] || desde || 0) / 1000);
+    const itens = [];
+    for (const g of mensagensGuardadas.values()) {
+      if (g.key.remoteJid !== jid || (g.em || 0) < inicio) continue;
+      const texto = resumo(conteudo(g));
+      if (texto) itens.push({ em: g.em || 0, nome: g.key.fromMe ? 'Bot' : g.nome || nomeDaPessoa(g.key.participant, g.key.participantAlt) || 'alguém', texto: semRotulo(texto) });
+    }
+    itens.sort((a, b) => a.em - b.em);
+    const ultimas = itens.slice(-150).map((x) => `[${dataHora(x.em)}] ${x.nome}: ${x.texto.replace(/\s+/g, ' ').slice(0, 500)}`);
+    const cabeca = `📜 O que rolou no grupo *${meta?.subject || ''}* enquanto você estava fora${inicio ? ` (desde ${dataHora(inicio)})` : ''}:`;
+    if (!ultimas.length) { await sock.sendMessage(destino, { text: `${cabeca}\nNinguém mandou nada.` }); return 0; }
+    let bloco = cabeca;
+    for (const l of ultimas) {
+      if (`${bloco}\n${l}`.length > 3500) { await sock.sendMessage(destino, { text: bloco }); bloco = ''; }
+      bloco = bloco ? `${bloco}\n${l}` : l;
+    }
+    if (bloco) await sock.sendMessage(destino, { text: bloco });
+    return ultimas.length;
+  }
+
   const DURACAO = { desligar: 0, '24h': 86400, '7d': 7 * 86400, '90d': 90 * 86400 };
   /**
    * Executa a função de admin que o Claude pediu. Devolve { ok, detalhe }; lança erro com a explicação
@@ -1082,6 +1117,19 @@ async function iniciar() {
       const r = await sock.groupParticipantsUpdate(jid, alvos, { remover: 'remove', adicionar: 'add', promover_admin: 'promote', tirar_admin: 'demote' }[a.acao]);
       groupCache.del(jid);
       let falhas = (r || []).filter((x) => String(x.status) !== '200');
+      const deram = alvos.filter((j) => !falhas.some((x) => digitos(x.jid) === digitos(j)));
+      if (a.acao === 'remover') {
+        for (const j of deram) {
+          const p = participante(digitos(jidNormalizedUser(j)));
+          marcarSaida(jid, [j, p?.lid, p?.phoneNumber, p?.id]);
+        }
+      }
+      if (a.acao === 'adicionar' && a.mandar_historico) {
+        for (const j of deram) {
+          try { log(`Admin: mandei ${await mandarHistorico(jid, jidNormalizedUser(j), a.historico_desde, meta)} mensagem(ns) do histórico para ${j}.`); }
+          catch (e) { log(`Admin: não deu para mandar o histórico para ${j} (${e.message}).`); }
+        }
+      }
       // Privacidade da pessoa não deixa adicionar direto (403): manda o link do grupo no privado dela.
       if (a.acao === 'adicionar') {
         const bloqueados = falhas.filter((x) => String(x.status) === '403');
@@ -1248,7 +1296,7 @@ async function iniciar() {
         await enviar(texto);
       } catch (e) {
         log(`Agendado (de ${a.pedidoPor}): ${a.admin?.acao || 'mensagem'} não deu (${e.message}).`);
-        await enviar(`Era para ${a.descricao} agora, mas não consegui: ${e.message}.`).catch(() => {});
+        await enviar(`Na hora marcada não deu (${a.descricao}): ${e.message}.`).catch(() => {});
       }
     }
   };
