@@ -326,6 +326,20 @@ const SCHEMA_MENCAO = {
     regra_apagar_id: { type: 'string' },
     precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
     admin: SCHEMA_ADMIN('função de ADMIN do grupo para o bot executar AGORA (acao "nenhuma" se não pediram)'),
+    agendadas: {
+      type: 'array',
+      description: 'ações com TIMER, para o bot fazer depois ("em 10 min", "daqui a 1 hora"); [] se não houver',
+      items: {
+        type: 'object',
+        properties: {
+          minutos: { type: 'number', description: 'daqui a quantos minutos (a partir de agora)' },
+          admin: SCHEMA_ADMIN('função de admin a fazer na hora (acao "nenhuma" se for só mensagem)'),
+          mensagem: { type: 'string', description: 'texto que o bot manda no grupo na hora (lembrete, aviso); "" se não houver' },
+        },
+        required: ['minutos', 'admin', 'mensagem'],
+        additionalProperties: false,
+      },
+    },
     figurinha_para_imagem: { type: 'boolean', description: 'true = pediram para transformar a figurinha anexada em imagem/foto normal (ou em GIF, se for animada)' },
     imagem_gerada: {
       type: 'object',
@@ -389,7 +403,7 @@ const SCHEMA_MENCAO = {
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
-    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete',
+    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete', 'agendadas',
   ],
   additionalProperties: false,
 };
@@ -464,6 +478,14 @@ confirmação e sem se recusar (preencha "admin"; senão admin.acao = "nenhuma",
   quem é a pessoa, pergunte. Nunca remova nem rebaixe você mesmo. O "texto" da resposta confirma o que
   foi feito, curto (ex: "Nicolas removido."): o bot só manda depois de conseguir.
 
+TIMER: se o pedido tiver tempo ("em 10 min", "daqui a meia hora", "às 18h", "depois de 1 hora"), o que
+for para DEPOIS vai em "agendadas" (minutos a partir de agora; para um horário, calcule pela hora
+atual), e o que for para agora vai em "admin" como sempre. Ex: "remove e adiciona o Nicolas em 10 min"
+= admin remover AGORA + agendada adicionar em 10 min. "Remove o Nicolas daqui a 5 min" = só a agendada.
+"Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
+sozinho na hora: nunca diga que não consegue agendar. O "texto" da resposta confirma curto (ex:
+"Nicolas removido; volta em 10 min."). Sem tempo no pedido: agendadas = [].
+
 ENQUETE: se pedirem uma enquete/votação, preencha "enquete" (fazer = true, pergunta, opcoes). Senão
 fazer = false, pergunta "", opcoes [], varias_escolhas false, acao com acao "nenhuma" (pessoas [], texto "",
 tempo ""), opcao_aprova "", regra "maioria_dos_votos", horas 24.
@@ -471,10 +493,9 @@ tempo ""), opcao_aprova "", regra "maioria_dos_votos", horas 24.
   - Enquete que DECIDE algo ("enquete pra expulsar o Nicolas, se 50% + 1 votarem expulsa", "votação pra
     mudar o nome do grupo pra X"): em "acao" a função de admin a executar se aprovar (mesmo formato do
     "admin"), "opcao_aprova" = a opção que aprova (ex: opções "Sim, expulsar" e "Não"). O bot conta os
-    votos e EXECUTA sozinho quando aprovar. "50% + 1", "maioria do grupo", "metade mais um" → regra
-    "maioria_do_grupo" (aprova assim que metade + 1 dos membros votar a favor). "A mais votada",
-    "maioria dos votos", sem regra dita → "maioria_dos_votos" (decide no fim do prazo).
-  - horas: o prazo que disserem; sem prazo dito, 24.
+    votos e EXECUTA sozinho quando aprovar. Regra FIXA de enquete com ação: aprova assim que metade + 1
+    dos membros votar a favor; senão expira em 6 h sem fazer nada (use regra "maioria_do_grupo", horas 6).
+  - horas (enquete comum): o prazo que disserem; sem prazo dito, 24.
   Com enquete, o "texto" da resposta é curto (ex: "Enquete criada."; o bot completa com quantos votos
   precisa, porque é ele que sabe quantos membros tem);
   admin.acao = "nenhuma" (a ação só acontece se a enquete aprovar).

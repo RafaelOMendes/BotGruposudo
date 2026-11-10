@@ -40,6 +40,7 @@ import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImag
 import { gerarPdf } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
+import { agendar, vencidas } from './agenda.mjs';
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -376,6 +377,9 @@ let sockAtual = null;
 // Enquetes com prazo: confere a cada minuto (a função é da conexão atual; reconectar troca).
 let avaliarEnquetes = null;
 setInterval(() => avaliarEnquetes?.(), 60_000).unref?.();
+// Ações com timer: confere a cada 15 s.
+let rodarAgendadas = null;
+setInterval(() => rodarAgendadas?.(), 15_000).unref?.();
 let conectado = false;
 let filaClaude = Promise.resolve(); // uma pergunta por vez para o claude
 const naFilaDoClaude = (f) => {
@@ -815,6 +819,27 @@ async function iniciar() {
           }
         }
 
+        // Ações com timer ("adiciona o Nicolas de volta em 10 min", "me lembra em 1 hora").
+        if (v.acao === 'responder' && Array.isArray(v.agendadas) && v.agendadas.length) {
+          const meta2 = await metadadosGrupo(jid).catch(() => meta);
+          const feitas = [];
+          for (const a of v.agendadas.slice(0, 5)) {
+            const minutos = Math.min(7 * 24 * 60, Math.max(0.25, Number(a.minutos) || 0));
+            const admin = a.admin?.acao && a.admin.acao !== 'nenhuma' ? a.admin : null;
+            if (!admin && !a.mensagem?.trim()) continue;
+            const quando = Date.now() + minutos * 60e3;
+            const descricao = admin ? descreverAcao(admin, meta2) : 'aviso';
+            agendar({ jid, quando, admin, mensagem: a.mensagem || '', pedidoPor: autor, descricao });
+            const hora = new Date(quando).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+            feitas.push(`${descricao} às ${hora}`);
+            log(`Agendado por ${autor} para ${hora} (em ${minutos} min): ${admin ? admin.acao + (admin.pessoas?.length ? ` (${admin.pessoas.join(', ')})` : '') : ''}${a.mensagem ? ` mensagem "${a.mensagem.slice(0, 60)}"` : ''}.`);
+          }
+          if (feitas.length) {
+            servico = servico ? `${servico} + Agendado` : 'Agendado';
+            resposta = [resposta, `⏰ ${feitas.join('; ')}.`].filter(Boolean).join('\n');
+          }
+        }
+
         // Enquete (com ação se aprovada, ex: expulsar se metade + 1 votar sim).
         if (v.acao === 'responder' && v.enquete?.fazer) {
           try {
@@ -839,8 +864,8 @@ async function iniciar() {
               servico = 'Imagem gerada';
               log(`Imagem gerada para ${autor}: "${v.imagem_gerada.prompt.slice(0, 80)}"`);
             } catch (e) {
-              log(`Não deu para gerar a imagem depois de 3 tentativas (${e.message}).`);
-              resposta = falhaAmigavel('imagem');
+              log(`Não deu para gerar a imagem${e.semMemoria ? '' : ' depois de 3 tentativas'} (${e.message}).`);
+              resposta = e.semMemoria ? `Não gerei a imagem: ${e.message}.` : falhaAmigavel('imagem');
               // Guarda o prompt no histórico: se pedirem "tenta de novo", o Claude sabe o que era.
               registrar(jid, 'Bot (nota interna)', `a imagem não saiu; prompt usado: ${v.imagem_gerada.prompt}`);
             }
@@ -886,7 +911,7 @@ async function iniciar() {
           } catch (e) {
             log(`Não deu para fazer a figurinha (${e.message}).`);
             if (v.figurinha.origem === 'gerada') {
-              resposta = falhaAmigavel('figurinha');
+              resposta = e.semMemoria ? `Não gerei a figurinha: ${e.message}.` : falhaAmigavel('figurinha');
               registrar(jid, 'Bot (nota interna)', `a figurinha não saiu; prompt usado: ${v.figurinha.prompt}`);
             } else resposta = `Não consegui fazer a figurinha: ${e.message}.`; // ex: "manda a imagem junto"
           }
@@ -1099,7 +1124,7 @@ async function iniciar() {
   function descreverAcao(a, meta) {
     const nomes = (a.pessoas || []).map((n) => {
       const p = (meta?.participants || []).find((x) => [x.id, x.lid, x.phoneNumber].filter(Boolean).some((j) => digitos(jidNormalizedUser(j)) === digitos(n)));
-      return (p && nomeDaPessoa(p.id, p.lid, p.phoneNumber)) || `+${digitos(n)}`;
+      return (p && nomeDaPessoa(p.id, p.lid, p.phoneNumber)) || nomeDaPessoa(`${digitos(n)}@lid`, `${digitos(n)}@s.whatsapp.net`) || `+${digitos(n)}`;
     }).join(', ');
     return {
       remover: `removo ${nomes}`, adicionar: `adiciono ${nomes}`, promover_admin: `coloco ${nomes} de admin`, tirar_admin: `tiro o admin de ${nomes}`,
@@ -1124,9 +1149,10 @@ async function iniciar() {
       if (!eu?.admin) throw new Error('não sou admin do grupo, então não conseguiria cumprir o resultado');
     }
     const opcaoAprova = acao ? (opcoes.find((o) => normalizar(o) === normalizar(e.opcao_aprova)) || opcoes[0]) : '';
-    const regra = acao ? e.regra : 'maioria_dos_votos';
+    // Enquete com ação: sempre aprova quando metade + 1 dos membros votar a favor; senão expira em 6 h.
+    const regra = acao ? 'maioria_do_grupo' : 'maioria_dos_votos';
     const limite = Math.floor(membros / 2) + 1;
-    const horas = Math.min(24 * 7, Math.max(0.05, Number(e.horas) || 24));
+    const horas = acao ? 6 : Math.min(24 * 7, Math.max(0.05, Number(e.horas) || 24));
     const segredo = novoSegredo();
     const enviada = guardarEnviada(await sock.sendMessage(jid, { poll: { name: String(e.pergunta || 'Enquete').slice(0, 255), values: opcoes, selectableCount: e.varias_escolhas ? 0 : 1, messageSecret: segredo } }));
     registrarEnquete({
@@ -1158,13 +1184,14 @@ async function iniciar() {
     }
     const aFavor = c[e.opcaoAprova] || 0;
     const outras = Math.max(0, ...e.opcoes.filter((o) => o !== e.opcaoAprova).map((o) => c[o] || 0));
-    // Quem ainda não votou: se nem com todos eles o resultado muda, decide na hora (não espera o prazo).
+    // Com ação: aprova assim que metade + 1 dos membros votar a favor; senão espera o prazo (6 h) e
+    // expira sem fazer nada (não encerra antes: dá para mudar o voto). Enquetes antigas sem essa regra:
+    // decide quando o resultado não tem mais como virar.
     const restantes = Math.max(0, (e.membros || 0) - pessoas);
     const aprovou = e.regra === 'maioria_do_grupo'
       ? aFavor >= e.limite
       : aFavor > outras + restantes || (fimDoPrazo && aFavor > outras);
-    const semChance = e.regra === 'maioria_do_grupo' ? aFavor + restantes < e.limite : aFavor + restantes <= outras;
-    if (!aprovou && !fimDoPrazo && !semChance) return;
+    if (!aprovou && !fimDoPrazo) return;
     encerrar(e.id, `${aprovou ? 'aprovada' : 'rejeitada'} (${placar})`);
     if (!aprovou) {
       await enviar(`Enquete encerrada e não aprovada${e.regra === 'maioria_do_grupo' ? ` (precisava de ${e.limite} votos em "${e.opcaoAprova}")` : ''}. Não vou fazer nada.\n${placar}`);
@@ -1184,6 +1211,25 @@ async function iniciar() {
   // A cada minuto: encerra as vencidas e decide as que já não têm como virar (inclusive as que ganharam
   // votos enquanto o bot estava desligado ou antes desta regra existir).
   avaliarEnquetes = () => Promise.all(enquetesAbertas().map((e) => avaliarEnquete(e, Date.now() >= e.expiraEm).catch((err) => log('Erro ao conferir enquete:', err.message))));
+
+  // Executa as ações com timer que chegaram na hora.
+  rodarAgendadas = async () => {
+    for (const a of vencidas()) {
+      const enviar = async (texto) => guardarEnviada(await sock.sendMessage(a.jid, { text: marcaServico('Agendado', texto), mentions: mencoesDoTexto(texto, await metadadosGrupo(a.jid).catch(() => null)) }));
+      try {
+        let texto = a.mensagem || '';
+        if (a.admin) {
+          const r = await executarAdmin(a.admin, { jid: a.jid, ctx: null, imagens: [], outrosMarcados: [] });
+          log(`Agendado (de ${a.pedidoPor}): ${a.admin.acao} feito (${r.detalhe}).`);
+          texto = [texto || `Na hora marcada: ${a.descricao}: feito.`, r.parcial, r.extra].filter(Boolean).join('\n');
+        } else log(`Agendado (de ${a.pedidoPor}): mensagem enviada.`);
+        await enviar(texto);
+      } catch (e) {
+        log(`Agendado (de ${a.pedidoPor}): ${a.admin?.acao || 'mensagem'} não deu (${e.message}).`);
+        await enviar(`Era para ${a.descricao} agora, mas não consegui: ${e.message}.`).catch(() => {});
+      }
+    }
+  };
 
   async function tratarVoto(m) {
     const e = registrarVoto(m);

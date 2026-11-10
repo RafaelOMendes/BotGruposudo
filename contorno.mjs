@@ -196,5 +196,19 @@ export function contornar(buffer, area = { x: 0, y: 0, w: 1, h: 1 }) {
     return montarPng(img, alfa);
   });
   fila = tarefa.catch(() => {});
+  tarefa.finally(liberarDepois).catch(() => {});
   return tarefa;
+}
+
+// Os modelos ocupam 1-2 GB de memória: sem uso por 2 min, libera (o gerador de imagem precisa dela).
+let timerLiberar = null;
+function liberarDepois() {
+  clearTimeout(timerLiberar);
+  timerLiberar = setTimeout(async () => {
+    for (const [nome, p] of Object.entries(sessoes)) {
+      delete sessoes[nome];
+      try { await (await p).s.release(); } catch { /* já liberada */ }
+    }
+  }, 2 * 60_000);
+  timerLiberar.unref?.();
 }

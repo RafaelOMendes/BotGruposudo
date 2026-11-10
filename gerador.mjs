@@ -52,6 +52,27 @@ async function estaNoAr() {
   }
 }
 
+/**
+ * Memória virtual (commit) livre do Windows, em GB. O ComfyUI reserva muita memória ao carregar o
+ * modelo; sem espaço (arquivo de paginação pequeno + muita coisa aberta) ele quebra com 0xC0000005 /
+ * "os error 1455". Melhor avisar o motivo do que tentar 3 vezes à toa.
+ */
+async function memoriaVirtualLivreGb() {
+  if (process.platform !== 'win32') return Infinity;
+  const { execFile } = await import('node:child_process');
+  return new Promise((ok) => execFile('powershell', ['-NoProfile', '-Command', '(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory'], { windowsHide: true, timeout: 15_000 },
+    (e, out) => ok(e ? Infinity : Number(String(out).trim()) / 1024 / 1024 || Infinity)));
+}
+
+async function conferirMemoria() {
+  const livre = await memoriaVirtualLivreGb();
+  const minimo = cfg.memoriaMinGb ?? 12;
+  if (livre >= minimo) return;
+  const e = new Error(`memória do PC cheia (${livre.toFixed(1)} GB de memória virtual livres; o gerador precisa de uns ${minimo} GB). Fecha uns programas ou aumenta o arquivo de paginação do Windows`);
+  e.semMemoria = true;
+  throw e;
+}
+
 /** Liga o ComfyUI (se ainda não estiver no ar) e espera ele responder. */
 async function garantirNoAr() {
   if (await estaNoAr()) return;
@@ -149,7 +170,7 @@ export function gerarImagem(prompt, { formato = 'quadrado', passos } = {}) {
         return await gerarAgora(prompt, formato, passos || cfg.passos);
       } catch (e) {
         ultimoErro = e;
-        if (e.message === 'gerador de imagem não instalado') break;
+        if (e.message === 'gerador de imagem não instalado' || e.semMemoria) break; // tentar de novo não adianta
         cfg.log(`Gerar imagem: tentativa ${tentativa}/${TENTATIVAS} falhou (${e.message})${tentativa < TENTATIVAS ? '; tentando de novo...' : '.'}`);
         if (tentativa < TENTATIVAS) {
           // Travado mas ainda "no ar"? Derruba para religar limpo na próxima tentativa.
@@ -166,6 +187,7 @@ export function gerarImagem(prompt, { formato = 'quadrado', passos } = {}) {
 
 async function gerarAgora(prompt, formato, passos) {
   if (!disponivel()) throw new Error('gerador de imagem não instalado');
+  if (!(await estaNoAr())) await conferirMemoria();
   await garantirNoAr();
   clearTimeout(timerOcioso);
   const [largura, altura] = FORMATOS[formato] || FORMATOS.quadrado;
