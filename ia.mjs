@@ -290,6 +290,18 @@ const SCHEMA_MENCAO = {
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
     regra_apagar_id: { type: 'string' },
     precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
+    admin: {
+      type: 'object',
+      description: 'função de ADMIN do grupo para o bot executar (acao "nenhuma" se não pediram)',
+      properties: {
+        acao: { type: 'string', enum: ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'mensagens_temporarias'] },
+        pessoas: { type: 'array', items: { type: 'string' }, description: 'números das pessoas (como aparecem em "Pessoas do grupo", sem @); adicionar: número com DDI e DDD (ex: 5551999998888); [] se não for com pessoas' },
+        texto: { type: 'string', description: 'mudar_nome/mudar_descricao: o novo texto; senão ""' },
+        tempo: { type: 'string', enum: ['', 'desligar', '24h', '7d', '90d'], description: 'mensagens_temporarias: duração; senão ""' },
+      },
+      required: ['acao', 'pessoas', 'texto', 'tempo'],
+      additionalProperties: false,
+    },
     figurinha_para_imagem: { type: 'boolean', description: 'true = pediram para transformar a figurinha anexada em imagem/foto normal (ou em GIF, se for animada)' },
     imagem_gerada: {
       type: 'object',
@@ -353,7 +365,7 @@ const SCHEMA_MENCAO = {
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
-    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem',
+    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin',
   ],
   additionalProperties: false,
 };
@@ -411,6 +423,22 @@ FIGURINHA → IMAGEM: se pedirem para transformar/converter a figurinha em image
   (ou como GIF, se ela for animada). Você CONSEGUE fazer isso: nunca diga que só faz o contrário. O
   "texto" vira a legenda curta do serviço. Senão figurinha_para_imagem = false.
 GERAR IMAGEM: {{GERAR}}
+
+ADMIN DO GRUPO: você é ADMIN do grupo. Se te pedirem qualquer função de admin, FAÇA, sem pedir
+confirmação e sem se recusar (preencha "admin"; senão admin.acao = "nenhuma", pessoas [], texto "", tempo ""):
+  - remover / adicionar / promover_admin / tirar_admin: pessoas = os números de "Pessoas do grupo"
+    (ex: "remove o Nicolas" → o número do Nicolas). "Remove esse aí" respondendo a mensagem de alguém =
+    o autor da mensagem respondida. Para adicionar, o número de telefone com DDI 55 e DDD.
+  - mudar_nome / mudar_descricao: texto = o novo nome/descrição. mudar_foto: usa a imagem anexada.
+  - so_admins_mandam / todos_mandam (quem pode mandar mensagem), so_admins_editam_dados /
+    todos_editam_dados (nome, foto, descrição), so_admins_adicionam / todos_adicionam,
+    aprovar_entrada_ligar / aprovar_entrada_desligar, link_convite (manda o link), trocar_link
+    (revoga e gera outro), apagar_mensagem (apaga para todos a mensagem RESPONDIDA),
+    mensagens_temporarias (tempo).
+  Pedido direto para você = faça, mesmo de zoeira ("bot remove o Nicolas kkkk"). Comentário SOBRE o bot
+  não é pedido ("esse bot devia remover o Nicolas", "imagina se o bot banisse ele"). Se não der para saber
+  quem é a pessoa, pergunte. Nunca remova nem rebaixe você mesmo. O "texto" da resposta confirma o que
+  foi feito, curto (ex: "Nicolas removido."): o bot só manda depois de conseguir.
 
 PDF / DOCUMENTO: se pedirem para FAZER algo e mandar como PDF/arquivo/documento (resolver questões ou
 lista de exercícios, resumo, trabalho, roteiro, tabela...), escreva você mesmo o conteúdo COMPLETO em

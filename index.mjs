@@ -669,7 +669,8 @@ async function iniciar() {
     let citada = '';
     if (ctx?.quotedMessage) {
       const q = ctx.quotedMessage;
-      const quemCitado = ctx.participant && meusIds().includes(jidNormalizedUser(ctx.participant)) ? 'você (o bot)' : 'alguém do grupo';
+      const quemCitado = ctx.participant && meusIds().includes(jidNormalizedUser(ctx.participant)) ? 'você (o bot)'
+        : ctx.participant ? `${nomeDaPessoa(ctx.participant) || 'alguém do grupo'} (@${digitos(jidNormalizedUser(ctx.participant))})` : 'alguém do grupo';
       citada = `${quemCitado}: ${semMeuArroba(resumo(q)) || '[mensagem]'}`;
       try {
         await pegarMidia(q, { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: q });
@@ -760,7 +761,7 @@ async function iniciar() {
         grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid), fio,
         animacao: animado ? (animado.ext === 'webp' ? 'uma figurinha animada' : animado.gif ? 'um GIF' : 'um vídeo') : '',
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
-        pessoas: pessoasParaPrompt(jid),
+        pessoas: pessoasParaPrompt(jid, meta),
       });
     };
 
@@ -795,6 +796,19 @@ async function iniciar() {
           log(`Regra ${v.regra_apagar_id} ${ok ? 'apagada' : 'não encontrada'} (pedido de ${autor}).`);
           if (ok) servico = 'Regra apagada';
           else resposta = `Não achei a regra "${v.regra_apagar_id}".`;
+        }
+
+        // Função de admin (remover, adicionar, promover, nome, link...): só confirma depois de conseguir.
+        if (v.acao === 'responder' && v.admin?.acao && v.admin.acao !== 'nenhuma') {
+          try {
+            const r = await executarAdmin(v.admin, { jid, ctx, imagens, outrosMarcados });
+            log(`Admin: ${v.admin.acao}${v.admin.pessoas?.length ? ` (${v.admin.pessoas.join(', ')})` : ''} pedido por ${autor}: feito (${r.detalhe}).`);
+            servico = 'Admin';
+            resposta = [resposta, r.parcial, r.extra].filter(Boolean).join('\n');
+          } catch (e) {
+            log(`Admin: ${v.admin.acao} pedido por ${autor} não deu (${e.message}).`);
+            resposta = `Não consegui: ${e.message}.`;
+          }
         }
 
         // Imagem gerada pela IA local (ComfyUI).
@@ -957,8 +971,90 @@ async function iniciar() {
     for (const id of [m.key.participant, m.key.participantAlt].filter(Boolean)) mapa.set(digitos(jidNormalizedUser(id)), m.pushName);
     conhecidos.set(jid, mapa);
   }
-  function pessoasParaPrompt(jid) {
-    return [...(conhecidos.get(jid) || new Map())].map(([id, nome]) => `${nome} = @${id}`).join('\n');
+  // Todos os participantes (não só quem falou desde que o bot ligou), com o nome quando se sabe e
+  // quem é admin: o Claude precisa disso para marcar e para as funções de admin.
+  function pessoasParaPrompt(jid, meta) {
+    const linhas = new Map();
+    for (const [id, nome] of conhecidos.get(jid) || new Map()) linhas.set(id, { nome, admin: '' });
+    for (const p of meta?.participants || []) {
+      const ids = [p.id, p.lid, p.phoneNumber].filter(Boolean);
+      if (ids.some((i) => meusIds().includes(jidNormalizedUser(i)))) continue; // o próprio bot
+      const id = digitos(jidNormalizedUser(p.id));
+      const nome = linhas.get(id)?.nome || nomeDaPessoa(...ids) || (p.phoneNumber ? `+${digitos(p.phoneNumber)}` : '(sem nome)');
+      linhas.set(id, { nome, admin: p.admin === 'superadmin' ? ' (dono do grupo)' : p.admin ? ' (admin)' : '' });
+    }
+    return [...linhas].map(([id, { nome, admin }]) => `${nome} = @${id}${admin}`).join('\n');
+  }
+
+  // ---------- funções de admin ----------
+  const DURACAO = { desligar: 0, '24h': 86400, '7d': 7 * 86400, '90d': 90 * 86400 };
+  /**
+   * Executa a função de admin que o Claude pediu. Devolve { ok, detalhe }; lança erro com a explicação
+   * se não deu (o bot não é admin, pessoa não achada...).
+   */
+  async function executarAdmin(a, { jid, ctx, imagens, outrosMarcados }) {
+    const meta = await sock.groupMetadata(jid); // na hora: quem é admin e quem está no grupo agora
+    const eu = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => meusIds().includes(jidNormalizedUser(i))));
+    if (!eu?.admin) throw new Error('não sou admin do grupo');
+    const participante = (n) => (meta.participants || []).find((x) =>
+      [x.id, x.lid, x.phoneNumber, x.jid].filter(Boolean).some((j) => digitos(jidNormalizedUser(j)) === n));
+    const comPessoas = ['remover', 'adicionar', 'promover_admin', 'tirar_admin'].includes(a.acao);
+    let alvos = [];
+    if (comPessoas) {
+      const numeros = [...new Set((a.pessoas || []).map(digitos).filter((n) => n.length >= 8))];
+      for (const n of numeros) {
+        const p = participante(n);
+        if (p) alvos.push(p.id);
+        else if (a.acao === 'adicionar') alvos.push(`${n}@s.whatsapp.net`);
+      }
+      // Sem número: quem foi marcado na mensagem, ou o autor da mensagem respondida.
+      if (!alvos.length && a.acao !== 'adicionar') alvos = outrosMarcados.length ? [...outrosMarcados] : ctx?.participant ? [ctx.participant] : [];
+      alvos = alvos.filter((j) => !meusIds().includes(jidNormalizedUser(j)));
+      if (!alvos.length) throw new Error('não achei quem é a pessoa no grupo');
+      const r = await sock.groupParticipantsUpdate(jid, alvos, { remover: 'remove', adicionar: 'add', promover_admin: 'promote', tirar_admin: 'demote' }[a.acao]);
+      groupCache.del(jid);
+      const falhas = (r || []).filter((x) => String(x.status) !== '200');
+      if (falhas.length === alvos.length) {
+        const st = String(falhas[0]?.status);
+        throw new Error(st === '403' && a.acao === 'adicionar' ? 'a privacidade da pessoa não deixa adicionar direto (manda o link do grupo pra ela)'
+          : st === '409' ? (a.acao === 'adicionar' ? 'a pessoa já está no grupo' : 'a pessoa não está no grupo')
+          : st === '406' || st === '401' ? 'o WhatsApp não deixa (dono do grupo não pode ser removido nem rebaixado)'
+          : `o WhatsApp recusou (código ${st})`);
+      }
+      return { detalhe: `${a.acao} ${alvos.length - falhas.length}/${alvos.length}`, parcial: falhas.length ? `(${falhas.length} não deu)` : '' };
+    }
+    switch (a.acao) {
+      case 'mudar_nome':
+        if (!a.texto?.trim()) throw new Error('faltou o nome novo');
+        await sock.groupUpdateSubject(jid, a.texto.trim().slice(0, 100)); break;
+      case 'mudar_descricao': await sock.groupUpdateDescription(jid, a.texto?.trim() || undefined); break;
+      case 'mudar_foto':
+        if (!imagens.length) throw new Error('manda (ou responde) a imagem junto');
+        await sock.updateProfilePicture(jid, imagens[0]); break;
+      case 'so_admins_mandam': await sock.groupSettingUpdate(jid, 'announcement'); break;
+      case 'todos_mandam': await sock.groupSettingUpdate(jid, 'not_announcement'); break;
+      case 'so_admins_editam_dados': await sock.groupSettingUpdate(jid, 'locked'); break;
+      case 'todos_editam_dados': await sock.groupSettingUpdate(jid, 'unlocked'); break;
+      case 'so_admins_adicionam': await sock.groupMemberAddMode(jid, 'admin_add'); break;
+      case 'todos_adicionam': await sock.groupMemberAddMode(jid, 'all_member_add'); break;
+      case 'aprovar_entrada_ligar': await sock.groupJoinApprovalMode(jid, 'on'); break;
+      case 'aprovar_entrada_desligar': await sock.groupJoinApprovalMode(jid, 'off'); break;
+      case 'link_convite': return { detalhe: 'link', extra: `https://chat.whatsapp.com/${await sock.groupInviteCode(jid)}` };
+      case 'trocar_link': return { detalhe: 'link trocado', extra: `Link novo: https://chat.whatsapp.com/${await sock.groupRevokeInvite(jid)}` };
+      case 'apagar_mensagem': {
+        if (!ctx?.stanzaId) throw new Error('responde a mensagem que é para apagar');
+        const minha = !!(ctx.participant && meusIds().includes(jidNormalizedUser(ctx.participant)));
+        await sock.sendMessage(jid, { delete: { remoteJid: jid, id: ctx.stanzaId, fromMe: minha, ...(minha ? {} : { participant: ctx.participant }) } });
+        break;
+      }
+      case 'mensagens_temporarias': {
+        if (!(a.tempo in DURACAO)) throw new Error('faltou dizer o tempo (24h, 7 dias ou 90 dias)');
+        await sock.groupToggleEphemeral(jid, DURACAO[a.tempo]); break;
+      }
+      default: throw new Error(`não conheço a função "${a.acao}"`);
+    }
+    groupCache.del(jid);
+    return { detalhe: a.acao };
   }
 
   /** Acha os "@número" do texto que são participantes do grupo e devolve os JIDs para marcar. */
