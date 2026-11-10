@@ -37,7 +37,7 @@ import { contornar } from './contorno.mjs';
 import { aplicarEfeitos, camadaDeTexto, catalogoParaPrompt, filtroFfmpeg, figurinhaDeImagem, figurinhaDeMeme, figurinhaDeTexto } from './memes.mjs';
 import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
-import { gerarPdf } from './pdf.mjs';
+import { gerarPdf, gerarPdfConversa } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
 import { agendar, pendentes, vencidas } from './agenda.mjs';
@@ -443,10 +443,14 @@ async function iniciar() {
   const enviarOriginal = sock.sendMessage.bind(sock);
   sock.sendMessage = (jid, conteudoMsg, opcoes) =>
     enviarOriginal(jid, conteudoMsg, opcoes?.quoted?.message ? { ...opcoes, quoted: citacaoComNomes(opcoes.quoted) } : opcoes);
-  function citacaoComNomes(q) {
+  /** "@253914339389476" → "@Nome" (quando se sabe o nome). */
+  function arrobasComNomes(t) {
     const meus = new Set(meusIds().map(digitos));
     const nome = (d) => (meus.has(d) ? sock.user?.name || 'Bot' : nomeDaPessoa(`${d}@lid`, `${d}@s.whatsapp.net`));
-    const trocar = (t) => t.replace(/@(\d{6,})/g, (tudo, d) => (nome(d) ? `@${nome(d)}` : tudo));
+    return String(t || '').replace(/@(\d{6,})/g, (tudo, d) => (nome(d) ? `@${nome(d)}` : tudo));
+  }
+  function citacaoComNomes(q) {
+    const trocar = arrobasComNomes;
     const copia = copiaDaMensagem(q.message);
     const andar = (o, nivel = 0) => {
       if (!o || typeof o !== 'object' || nivel > 6) return;
@@ -1067,22 +1071,41 @@ async function iniciar() {
     // As mensagens guardadas têm a hora em SEGUNDOS (messageTimestamp); saídas e pedidos, em ms.
     const inicio = Math.floor((saidas[`${jid}|${digitos(destino)}`] || desde || 0) / 1000);
     const fim = ate ? Math.floor(ate / 1000) : Infinity;
+    const eDestino = (...ids) => ids.filter(Boolean).some((i) => digitos(jidNormalizedUser(i)) === digitos(destino));
+    const nomeDe = (key, nome) => (key?.fromMe ? 'Bot' : nome || nomeDaPessoa(key?.participant, key?.participantAlt) || 'alguém');
     const itens = [];
     for (const g of mensagensGuardadas.values()) {
       if (g.key.remoteJid !== jid || (g.em || 0) < inicio || (g.em || 0) > fim) continue;
-      const texto = resumo(conteudo(g));
-      if (texto) itens.push({ em: g.em || 0, nome: g.key.fromMe ? 'Bot' : g.nome || nomeDaPessoa(g.key.participant, g.key.participantAlt) || 'alguém', texto: semRotulo(texto) });
+      const c = conteudo(g);
+      const texto = arrobasComNomes(semRotulo(resumo(c) || '').trim());
+      if (!texto) continue;
+      const ctx = contextoDa(c);
+      const citadaG = ctx?.stanzaId ? mensagensGuardadas.get(ctx.stanzaId) : null;
+      const textoCitado = ctx?.quotedMessage ? arrobasComNomes(semRotulo(resumo(ctx.quotedMessage) || '')) : '';
+      const midia = c.imageMessage || c.videoMessage || c.stickerMessage;
+      itens.push({
+        em: g.em || 0,
+        data: new Date((g.em || 0) * 1000),
+        nome: nomeDe(g.key, g.nome),
+        texto,
+        // Quem recebe vê as próprias mensagens à direita, em verde, como no WhatsApp.
+        minha: !g.key.fromMe && eDestino(g.key.participant, g.key.participantAlt),
+        citada: textoCitado ? { nome: citadaG ? nomeDe(citadaG.key, citadaG.nome) : nomeDaPessoa(ctx.participant) || 'alguém', texto: textoCitado } : null,
+        miniatura: midia?.jpegThumbnail || midia?.pngThumbnail || null,
+      });
     }
     itens.sort((a, b) => a.em - b.em);
-    const ultimas = itens.slice(-150).map((x) => `[${dataHora(x.em)}] ${x.nome}: ${x.texto.replace(/\s+/g, ' ').slice(0, 500)}`);
-    const cabeca = `📜 O que rolou no grupo *${meta?.subject || ''}* enquanto você estava fora${inicio ? ` (desde ${dataHora(inicio)})` : ''}:`;
-    if (!ultimas.length) { await sock.sendMessage(destino, { text: `${cabeca}\nNinguém mandou nada.` }); return 0; }
-    let bloco = cabeca;
-    for (const l of ultimas) {
-      if (`${bloco}\n${l}`.length > 3500) { await sock.sendMessage(destino, { text: bloco }); bloco = ''; }
-      bloco = bloco ? `${bloco}\n${l}` : l;
-    }
-    if (bloco) await sock.sendMessage(destino, { text: bloco });
+    const ultimas = itens.slice(-300);
+    const desdeTxt = inicio ? dataHora(inicio) : '';
+    const pdf = await gerarPdfConversa({
+      titulo: meta?.subject || 'Grupo',
+      subtitulo: `O que rolou enquanto você estava fora${desdeTxt ? ` (desde ${desdeTxt})` : ''}: ${ultimas.length} mensagem(ns)`,
+      mensagens: ultimas,
+    }, { navegador: local.navegador });
+    await sock.sendMessage(destino, {
+      document: pdf, mimetype: 'application/pdf', fileName: `${(meta?.subject || 'Grupo').replace(/[\\/:*?"<>|]+/g, ' ').trim()} - o que você perdeu.pdf`,
+      caption: `📜 O que rolou no grupo *${meta?.subject || ''}* enquanto você estava fora${desdeTxt ? ` (desde ${desdeTxt})` : ''}: ${ultimas.length ? `${ultimas.length} mensagem(ns)` : 'ninguém mandou nada'}.`,
+    });
     return ultimas.length;
   }
 
