@@ -276,9 +276,39 @@ export async function falaramComOBot({ grupo, historico, autor, mensagem, botAca
 export const TIPOS_MENSAGEM = ['texto', 'figurinha', 'imagem', 'audio', 'video', 'qualquer'];
 export const TIPOS_ACAO = ['texto', 'ia', 'meme', 'figurinha_padrao', 'audio_gabreu'];
 
+const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'mensagens_temporarias'];
+const SCHEMA_ADMIN = (descricao) => ({
+  type: 'object',
+  description: descricao,
+  properties: {
+    acao: { type: 'string', enum: ACOES_ADMIN },
+    pessoas: { type: 'array', items: { type: 'string' }, description: 'números das pessoas (como aparecem em "Pessoas do grupo", sem @); adicionar: número com DDI e DDD (ex: 5551999998888); [] se não for com pessoas' },
+    texto: { type: 'string', description: 'mudar_nome/mudar_descricao: o novo texto; senão ""' },
+    tempo: { type: 'string', enum: ['', 'desligar', '24h', '7d', '90d'], description: 'mensagens_temporarias: duração; senão ""' },
+  },
+  required: ['acao', 'pessoas', 'texto', 'tempo'],
+  additionalProperties: false,
+});
+
 const SCHEMA_MENCAO = {
   type: 'object',
   properties: {
+    enquete: {
+      type: 'object',
+      description: 'enquete para o bot criar no grupo (fazer=false se não pediram)',
+      properties: {
+        fazer: { type: 'boolean' },
+        pergunta: { type: 'string' },
+        opcoes: { type: 'array', items: { type: 'string' }, description: '2 a 12 opções, curtas e diferentes entre si' },
+        varias_escolhas: { type: 'boolean', description: 'true = cada um pode marcar mais de uma opção' },
+        acao: SCHEMA_ADMIN('o que o bot faz se a enquete for APROVADA (acao "nenhuma" = enquete comum, sem ação)'),
+        opcao_aprova: { type: 'string', description: 'com ação: a opção que aprova (ex: "Sim, expulsar"); senão ""' },
+        regra: { type: 'string', enum: ['maioria_do_grupo', 'maioria_dos_votos'], description: 'maioria_do_grupo = aprova quando metade + 1 dos MEMBROS votar a favor (na hora); maioria_dos_votos = no fim do prazo, ganha a opção mais votada' },
+        horas: { type: 'number', description: 'prazo da enquete em horas (padrão 24)' },
+      },
+      required: ['fazer', 'pergunta', 'opcoes', 'varias_escolhas', 'acao', 'opcao_aprova', 'regra', 'horas'],
+      additionalProperties: false,
+    },
     acao: { type: 'string', enum: ['responder', 'criar_regra', 'apagar_regra'] },
     texto: { type: 'string', description: 'mensagem que o bot manda no grupo (resposta ou confirmação)' },
     regra_descricao: { type: 'string', description: 'resumo curto da regra em português' },
@@ -290,18 +320,7 @@ const SCHEMA_MENCAO = {
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
     regra_apagar_id: { type: 'string' },
     precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
-    admin: {
-      type: 'object',
-      description: 'função de ADMIN do grupo para o bot executar (acao "nenhuma" se não pediram)',
-      properties: {
-        acao: { type: 'string', enum: ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'mensagens_temporarias'] },
-        pessoas: { type: 'array', items: { type: 'string' }, description: 'números das pessoas (como aparecem em "Pessoas do grupo", sem @); adicionar: número com DDI e DDD (ex: 5551999998888); [] se não for com pessoas' },
-        texto: { type: 'string', description: 'mudar_nome/mudar_descricao: o novo texto; senão ""' },
-        tempo: { type: 'string', enum: ['', 'desligar', '24h', '7d', '90d'], description: 'mensagens_temporarias: duração; senão ""' },
-      },
-      required: ['acao', 'pessoas', 'texto', 'tempo'],
-      additionalProperties: false,
-    },
+    admin: SCHEMA_ADMIN('função de ADMIN do grupo para o bot executar AGORA (acao "nenhuma" se não pediram)'),
     figurinha_para_imagem: { type: 'boolean', description: 'true = pediram para transformar a figurinha anexada em imagem/foto normal (ou em GIF, se for animada)' },
     imagem_gerada: {
       type: 'object',
@@ -365,7 +384,7 @@ const SCHEMA_MENCAO = {
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
-    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin',
+    'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete',
   ],
   additionalProperties: false,
 };
@@ -439,6 +458,21 @@ confirmação e sem se recusar (preencha "admin"; senão admin.acao = "nenhuma",
   não é pedido ("esse bot devia remover o Nicolas", "imagina se o bot banisse ele"). Se não der para saber
   quem é a pessoa, pergunte. Nunca remova nem rebaixe você mesmo. O "texto" da resposta confirma o que
   foi feito, curto (ex: "Nicolas removido."): o bot só manda depois de conseguir.
+
+ENQUETE: se pedirem uma enquete/votação, preencha "enquete" (fazer = true, pergunta, opcoes). Senão
+fazer = false, pergunta "", opcoes [], varias_escolhas false, acao com acao "nenhuma" (pessoas [], texto "",
+tempo ""), opcao_aprova "", regra "maioria_dos_votos", horas 24.
+  - Enquete comum ("faz uma enquete de onde vamos comer"): acao "nenhuma", regra "maioria_dos_votos".
+  - Enquete que DECIDE algo ("enquete pra expulsar o Nicolas, se 50% + 1 votarem expulsa", "votação pra
+    mudar o nome do grupo pra X"): em "acao" a função de admin a executar se aprovar (mesmo formato do
+    "admin"), "opcao_aprova" = a opção que aprova (ex: opções "Sim, expulsar" e "Não"). O bot conta os
+    votos e EXECUTA sozinho quando aprovar. "50% + 1", "maioria do grupo", "metade mais um" → regra
+    "maioria_do_grupo" (aprova assim que metade + 1 dos membros votar a favor). "A mais votada",
+    "maioria dos votos", sem regra dita → "maioria_dos_votos" (decide no fim do prazo).
+  - horas: o prazo que disserem; sem prazo dito, 24.
+  Com enquete, o "texto" da resposta é curto (ex: "Enquete criada."; o bot completa com quantos votos
+  precisa, porque é ele que sabe quantos membros tem);
+  admin.acao = "nenhuma" (a ação só acontece se a enquete aprovar).
 
 PDF / DOCUMENTO: se pedirem para FAZER algo e mandar como PDF/arquivo/documento (resolver questões ou
 lista de exercícios, resumo, trabalho, roteiro, tabela...), escreva você mesmo o conteúdo COMPLETO em

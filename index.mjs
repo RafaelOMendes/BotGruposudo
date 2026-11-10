@@ -39,6 +39,7 @@ import { Regras } from './regras.mjs';
 import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImagem } from './gerador.mjs';
 import { gerarPdf } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
+import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -372,6 +373,9 @@ const jaRespondidas = new Set();
 
 // Conexão atual (troca a cada reconexão) e fila do Claude, compartilhadas com os avisos de entregas.
 let sockAtual = null;
+// Enquetes com prazo: confere a cada minuto (a função é da conexão atual; reconectar troca).
+let avaliarEnquetes = null;
+setInterval(() => avaliarEnquetes?.(), 60_000).unref?.();
 let conectado = false;
 let filaClaude = Promise.resolve(); // uma pergunta por vez para o claude
 const naFilaDoClaude = (f) => {
@@ -811,6 +815,18 @@ async function iniciar() {
           }
         }
 
+        // Enquete (com ação se aprovada, ex: expulsar se metade + 1 votar sim).
+        if (v.acao === 'responder' && v.enquete?.fazer) {
+          try {
+            const regra = await criarEnquete(v.enquete, jid, autor);
+            servico = 'Enquete';
+            resposta = [resposta, regra].filter(Boolean).join('\n');
+          } catch (e) {
+            log(`Enquete pedida por ${autor} não deu (${e.message}).`);
+            resposta = `Não criei a enquete: ${e.message}.`;
+          }
+        }
+
         // Imagem gerada pela IA local (ComfyUI).
         if (v.acao === 'responder' && v.imagem_gerada?.fazer && v.imagem_gerada.prompt) {
           if (!geradorOk || !temGerador()) resposta = 'O gerador de imagem tá desligado agora.';
@@ -1057,6 +1073,99 @@ async function iniciar() {
     return { detalhe: a.acao };
   }
 
+  // ---------- enquetes (com ação opcional quando aprovadas) ----------
+  /** O que a ação faz, em português, para avisar no grupo ("removo Nicolas"). */
+  function descreverAcao(a, meta) {
+    const nomes = (a.pessoas || []).map((n) => {
+      const p = (meta?.participants || []).find((x) => [x.id, x.lid, x.phoneNumber].filter(Boolean).some((j) => digitos(jidNormalizedUser(j)) === digitos(n)));
+      return (p && nomeDaPessoa(p.id, p.lid, p.phoneNumber)) || `+${digitos(n)}`;
+    }).join(', ');
+    return {
+      remover: `removo ${nomes}`, adicionar: `adiciono ${nomes}`, promover_admin: `coloco ${nomes} de admin`, tirar_admin: `tiro o admin de ${nomes}`,
+      mudar_nome: `mudo o nome do grupo para "${a.texto}"`, mudar_descricao: 'mudo a descrição do grupo',
+      so_admins_mandam: 'fecho o grupo (só admin manda mensagem)', todos_mandam: 'abro o grupo (todo mundo manda mensagem)',
+      so_admins_editam_dados: 'deixo só admin editar os dados do grupo', todos_editam_dados: 'deixo todo mundo editar os dados do grupo',
+      so_admins_adicionam: 'deixo só admin adicionar gente', todos_adicionam: 'deixo todo mundo adicionar gente',
+      aprovar_entrada_ligar: 'ligo a aprovação para entrar', aprovar_entrada_desligar: 'desligo a aprovação para entrar',
+      trocar_link: 'troco o link do grupo', mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
+    }[a.acao] || `faço "${a.acao}"`;
+  }
+
+  /** Manda a enquete no grupo e registra. Devolve o texto que explica a regra (ou ''). */
+  async function criarEnquete(e, jid, autor) {
+    const opcoes = [...new Set((e.opcoes || []).map((o) => String(o).trim().slice(0, 100)).filter(Boolean))].slice(0, 12);
+    if (opcoes.length < 2) throw new Error('enquete precisa de pelo menos 2 opções');
+    const acao = e.acao?.acao && e.acao.acao !== 'nenhuma' ? e.acao : null;
+    const meta = await sock.groupMetadata(jid);
+    const membros = (meta.participants || []).filter((p) => ![p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => meusIds().includes(jidNormalizedUser(i)))).length;
+    if (acao) {
+      const eu = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => meusIds().includes(jidNormalizedUser(i))));
+      if (!eu?.admin) throw new Error('não sou admin do grupo, então não conseguiria cumprir o resultado');
+    }
+    const opcaoAprova = acao ? (opcoes.find((o) => normalizar(o) === normalizar(e.opcao_aprova)) || opcoes[0]) : '';
+    const regra = acao ? e.regra : 'maioria_dos_votos';
+    const limite = Math.floor(membros / 2) + 1;
+    const horas = Math.min(24 * 7, Math.max(0.05, Number(e.horas) || 24));
+    const segredo = novoSegredo();
+    const enviada = guardarEnviada(await sock.sendMessage(jid, { poll: { name: String(e.pergunta || 'Enquete').slice(0, 255), values: opcoes, selectableCount: e.varias_escolhas ? 0 : 1, messageSecret: segredo } }));
+    registrarEnquete({
+      id: enviada.key.id, jid, pergunta: e.pergunta, opcoes, segredo, criadores: meusIds(),
+      acao, opcaoAprova, regra, limite, membros, expiraEm: Date.now() + horas * 3600e3, pedidoPor: autor,
+    });
+    const prazo = horas >= 1 ? `${Math.round(horas)} h` : `${Math.round(horas * 60)} min`;
+    log(`Enquete criada por ${autor}: "${e.pergunta}" [${opcoes.join(' | ')}]${acao ? ` → ${acao.acao} se aprovar (${regra}, ${limite}/${membros})` : ''}, prazo ${prazo}.`);
+    if (!acao) return `Fica aberta por ${prazo}.`;
+    return regra === 'maioria_do_grupo'
+      ? `Se ${limite} dos ${membros} membros votarem "${opcaoAprova}", eu ${descreverAcao(acao, meta)}. Prazo: ${prazo}.`
+      : `Em ${prazo}, se "${opcaoAprova}" for a mais votada, eu ${descreverAcao(acao, meta)}.`;
+  }
+
+  /** Confere uma enquete: executa a ação se aprovou, ou encerra no fim do prazo. */
+  async function avaliarEnquete(e, fimDoPrazo = false) {
+    if (!e || e.encerrada) return;
+    const { c, pessoas } = contagem(e);
+    const citada = { key: { remoteJid: e.jid, id: e.id, fromMe: true }, message: { pollCreationMessage: { name: e.pergunta } } };
+    const placar = e.opcoes.map((o) => `${o}: ${c[o] || 0}`).join(' | ');
+    const enviar = async (texto) => guardarEnviada(await sock.sendMessage(e.jid, { text: marcaServico('Enquete', texto) }, { quoted: citada }));
+    if (!e.acao) {
+      if (!fimDoPrazo) return;
+      const max = Math.max(...e.opcoes.map((o) => c[o] || 0));
+      const vencedoras = e.opcoes.filter((o) => (c[o] || 0) === max);
+      encerrar(e.id, placar);
+      await enviar(pessoas ? `Enquete encerrada (${pessoas} votaram). ${vencedoras.length > 1 ? `Empate: ${vencedoras.join(' e ')}` : `Ganhou: ${vencedoras[0]}`}.\n${placar}` : 'Enquete encerrada sem nenhum voto.');
+      return;
+    }
+    const aFavor = c[e.opcaoAprova] || 0;
+    const outras = Math.max(0, ...e.opcoes.filter((o) => o !== e.opcaoAprova).map((o) => c[o] || 0));
+    const aprovou = e.regra === 'maioria_do_grupo' ? aFavor >= e.limite : fimDoPrazo && aFavor > outras;
+    if (!aprovou && !fimDoPrazo) return;
+    encerrar(e.id, `${aprovou ? 'aprovada' : 'rejeitada'} (${placar})`);
+    if (!aprovou) {
+      await enviar(`Enquete encerrada e não aprovada${e.regra === 'maioria_do_grupo' ? ` (precisava de ${e.limite} votos em "${e.opcaoAprova}")` : ''}. Não vou fazer nada.\n${placar}`);
+      log(`Enquete "${e.pergunta}" não aprovada (${placar}).`);
+      return;
+    }
+    try {
+      const oque = descreverAcao(e.acao, await metadadosGrupo(e.jid).catch(() => null)); // antes: a pessoa ainda está no grupo
+      const r = await executarAdmin(e.acao, { jid: e.jid, ctx: null, imagens: [], outrosMarcados: [] });
+      log(`Enquete "${e.pergunta}" aprovada (${placar}): ${e.acao.acao} feito (${r.detalhe}).`);
+      await enviar([`Enquete aprovada (${aFavor} votos em "${e.opcaoAprova}"). Como combinado, ${oque}: feito.`, r.parcial, r.extra].filter(Boolean).join('\n'));
+    } catch (err) {
+      log(`Enquete "${e.pergunta}" aprovada, mas a ação falhou (${err.message}).`);
+      await enviar(`Enquete aprovada, mas não consegui: ${err.message}.`);
+    }
+  }
+  avaliarEnquetes = () => Promise.all(enquetesAbertas().filter((e) => Date.now() >= e.expiraEm).map((e) => avaliarEnquete(e, true).catch((err) => log('Erro ao encerrar enquete:', err.message))));
+
+  async function tratarVoto(m) {
+    const e = registrarVoto(m);
+    if (!e) return;
+    if (e.erro) { log(`Enquete "${e.pergunta}": ${e.erro} (${m.pushName || m.key.participant}).`); return; }
+    const { c } = contagem(e);
+    log(`Voto de ${m.pushName || nomeDaPessoa(m.key.participant) || 'alguém'} na enquete "${e.pergunta}": ${e.opcoes.map((o) => `${o} ${c[o] || 0}`).join(', ')}.`);
+    await avaliarEnquete(e);
+  }
+
   /** Acha os "@número" do texto que são participantes do grupo e devolve os JIDs para marcar. */
   function mencoesDoTexto(texto, meta) {
     const numeros = [...new Set((String(texto || '').match(/@(\d{6,})/g) || []).map((t) => t.slice(1)))];
@@ -1266,13 +1375,15 @@ async function iniciar() {
     for (const m of messages) {
       if (!isJidGroup(m.key.remoteJid || '')) continue;
       guardarSegredo(m);
-      if (!m.key.fromMe) guardarMensagem(m, m.pushName); // as do bot entram pelo guardarEnviada
+      if (!m.key.fromMe && !m.message?.pollUpdateMessage) guardarMensagem(m, m.pushName); // as do bot entram pelo guardarEnviada
     }
     if (type !== 'notify') return; // 'append' = histórico sincronizado
     for (const m of messages) {
       try {
         const jid = m.key.remoteJid;
         if (!isJidGroup(jid)) continue;
+        // Voto numa enquete do bot: conta e, se aprovou, executa a ação.
+        if (m.message?.pollUpdateMessage) { await tratarVoto(m); continue; }
         const edicao = edicaoDe(m);
         if (edicao) {
           if (edicao.message) await tratarEdicao({ ...m.key, id: edicao.id }, edicao.message, m.pushName, 'mensagem');
