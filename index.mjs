@@ -838,7 +838,7 @@ async function iniciar() {
             const r = await executarAdmin(v.admin, { jid, ctx, imagens, outrosMarcados });
             log(`Admin: ${v.admin.acao}${v.admin.pessoas?.length ? ` (${v.admin.pessoas.join(', ')})` : ''} pedido por ${autor}: feito (${r.detalhe}).`);
             servico = 'Admin';
-            resposta = [resposta, r.parcial, r.extra].filter(Boolean).join('\n');
+            resposta = [r.resumoParcial || resposta, r.parcial, r.extra].filter(Boolean).join('\n');
           } catch (e) {
             log(`Admin: ${v.admin.acao} pedido por ${autor} não deu (${e.message}).`);
             resposta = `Não consegui: ${e.message}.`;
@@ -1046,7 +1046,9 @@ async function iniciar() {
   // quem é admin: o Claude precisa disso para marcar e para as funções de admin.
   function pessoasParaPrompt(jid, meta) {
     const linhas = new Map();
-    for (const [id, nome] of conhecidos.get(jid) || new Map()) linhas.set(id, { nome, admin: '' });
+    // Quem falou no grupo mas não está mais nele (removido/saiu): marcado, para o Claude não tentar remover.
+    const presentes = new Set((meta?.participants || []).flatMap((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)))));
+    for (const [id, nome] of conhecidos.get(jid) || new Map()) linhas.set(id, { nome, admin: meta?.participants && !presentes.has(id) ? ' (fora do grupo)' : '' });
     for (const p of meta?.participants || []) {
       const ids = [p.id, p.lid, p.phoneNumber].filter(Boolean);
       if (ids.some((i) => meusIds().includes(jidNormalizedUser(i)))) continue; // o próprio bot
@@ -1170,14 +1172,24 @@ async function iniciar() {
           if (!falhas.length) return { detalhe: `convite mandado no privado (${bloqueados.length})`, parcial: 'A privacidade não deixa adicionar direto, então mandei o link do grupo no privado.' };
         }
       }
-      if (falhas.length === alvos.length) {
-        const st = String(falhas[0]?.status);
-        throw new Error(st === '403' && a.acao === 'adicionar' ? 'a privacidade da pessoa não deixa adicionar direto (manda o link do grupo pra ela)'
-          : st === '409' ? (a.acao === 'adicionar' ? 'a pessoa já está no grupo' : 'a pessoa não está no grupo')
+      const motivo = (status) => {
+        const st = String(status);
+        return st === '403' && a.acao === 'adicionar' ? 'a privacidade da pessoa não deixa adicionar direto (manda o link do grupo pra ela)'
+          : st === '409' && a.acao === 'adicionar' ? 'já está no grupo'
+          : st === '409' || st === '404' ? 'não está no grupo'
           : st === '406' || st === '401' ? 'o WhatsApp não deixa (dono do grupo não pode ser removido nem rebaixado)'
-          : `o WhatsApp recusou (código ${st})`);
+          : `o WhatsApp recusou (código ${st})`;
+      };
+      const nomeDoAlvo = (j) => nomeDaPessoa(j, `${digitos(j)}@lid`, `${digitos(j)}@s.whatsapp.net`) || `+${digitos(j)}`;
+      if (falhas.length === alvos.length) {
+        throw new Error(alvos.length === 1 ? motivo(falhas[0]?.status) : falhas.map((x) => `${nomeDoAlvo(x.jid)} ${motivo(x.status)}`).join('; '));
       }
-      return { detalhe: `${a.acao} ${alvos.length - falhas.length}/${alvos.length}`, parcial: falhas.length ? `(${falhas.length} não deu)` : '' };
+      // Deu para uns e não para outros: o bot diz exatamente quem (o texto do Claude supunha que deu para todos).
+      const verbo = { remover: 'Removido(s)', adicionar: 'Adicionado(s)', promover_admin: 'Agora admin', tirar_admin: 'Sem admin' }[a.acao];
+      const resumoParcial = falhas.length
+        ? `${verbo}: ${deram.map(nomeDoAlvo).join(', ')}.\nNão deu: ${falhas.map((x) => `${nomeDoAlvo(x.jid)} (${motivo(x.status)})`).join(', ')}.`
+        : '';
+      return { detalhe: `${a.acao} ${alvos.length - falhas.length}/${alvos.length}`, resumoParcial };
     }
     switch (a.acao) {
       case 'mudar_nome':
@@ -1296,7 +1308,7 @@ async function iniciar() {
       const oque = descreverAcao(e.acao, await metadadosGrupo(e.jid).catch(() => null)); // antes: a pessoa ainda está no grupo
       const r = await executarAdmin(e.acao, { jid: e.jid, ctx: null, imagens: [], outrosMarcados: [] });
       log(`Enquete "${e.pergunta}" aprovada (${placar}): ${e.acao.acao} feito (${r.detalhe}).`);
-      await enviar([`Enquete aprovada (${aFavor} votos em "${e.opcaoAprova}"). Como combinado, ${oque}: feito.`, r.parcial, r.extra].filter(Boolean).join('\n'));
+      await enviar([`Enquete aprovada (${aFavor} votos em "${e.opcaoAprova}"). Como combinado, ${oque}: feito.`, r.resumoParcial, r.parcial, r.extra].filter(Boolean).join('\n'));
     } catch (err) {
       log(`Enquete "${e.pergunta}" aprovada, mas a ação falhou (${err.message}).`);
       await enviar(`Enquete aprovada, mas não consegui: ${err.message}.`);
@@ -1323,7 +1335,7 @@ async function iniciar() {
         if (a.admin) {
           const r = await executarAdmin(a.admin, { jid: a.jid, ctx: null, imagens: [], outrosMarcados: [] });
           log(`Agendado (de ${a.pedidoPor}): ${a.admin.acao} feito (${r.detalhe}).`);
-          texto = [texto || `Na hora marcada: ${a.descricao}: feito.`, r.parcial, r.extra].filter(Boolean).join('\n');
+          texto = [texto || (r.resumoParcial ? 'Na hora marcada:' : `Na hora marcada: ${a.descricao}: feito.`), r.resumoParcial, r.parcial, r.extra].filter(Boolean).join('\n');
         } else log(`Agendado (de ${a.pedidoPor}): mensagem enviada.`);
         await enviar(texto);
       } catch (e) {
