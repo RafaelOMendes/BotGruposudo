@@ -437,6 +437,28 @@ async function iniciar() {
   sock.ev.on('creds.update', saveCreds);
   sockAtual = sock;
 
+  // Ao responder, o Baileys apaga as menções da mensagem citada (contextInfo): aí o WhatsApp mostra o
+  // "@253914339389476" cru na citação. Passa para ele uma cópia com o "@número" já trocado pelo nome
+  // (e a original fica intacta para o fio de respostas).
+  const enviarOriginal = sock.sendMessage.bind(sock);
+  sock.sendMessage = (jid, conteudoMsg, opcoes) =>
+    enviarOriginal(jid, conteudoMsg, opcoes?.quoted?.message ? { ...opcoes, quoted: citacaoComNomes(opcoes.quoted) } : opcoes);
+  function citacaoComNomes(q) {
+    const meus = new Set(meusIds().map(digitos));
+    const nome = (d) => (meus.has(d) ? sock.user?.name || 'Bot' : nomeDaPessoa(`${d}@lid`, `${d}@s.whatsapp.net`));
+    const trocar = (t) => t.replace(/@(\d{6,})/g, (tudo, d) => (nome(d) ? `@${nome(d)}` : tudo));
+    const copia = copiaDaMensagem(q.message);
+    const andar = (o, nivel = 0) => {
+      if (!o || typeof o !== 'object' || nivel > 6) return;
+      for (const k of Object.keys(o)) {
+        if (typeof o[k] === 'string' && (k === 'conversation' || k === 'text' || k === 'caption')) o[k] = trocar(o[k]);
+        else if (o[k] && typeof o[k] === 'object' && !Buffer.isBuffer(o[k]) && !(o[k] instanceof Uint8Array)) andar(o[k], nivel + 1);
+      }
+    };
+    andar(copia);
+    return { ...q, message: copia };
+  }
+
   async function metadadosGrupo(jid) {
     let meta = groupCache.get(jid);
     if (!meta) {
