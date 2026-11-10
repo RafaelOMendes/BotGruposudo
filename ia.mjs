@@ -5,6 +5,7 @@
 // arquivos ou comandos do PC. Imagens vão embutidas na própria mensagem (stream-json), e a única
 // ferramenta liberada (só na conversa) é a busca na web.
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -103,12 +104,16 @@ export async function blocoImagem(buffer) {
 async function perguntar({ conteudo, sistema, schema, ferramentas = [], tarefa, timeoutMs = 180_000, cwd, leitura = [] }) {
   const { modelo, esforco } = MODELOS[tarefa] || {};
   if (!comando) throw new Error('claude CLI não encontrado');
+  // O prompt de sistema vai por ARQUIVO: na linha de comando ele estourava o limite do Windows
+  // (32.767 caracteres, "spawn ENAMETOOLONG") junto com o schema.
+  const arqSistema = path.join(os.tmpdir(), `bot-gabreu-sistema-${process.pid}-${crypto.randomBytes(4).toString('hex')}.txt`);
+  fs.writeFileSync(arqSistema, sistema);
   const args = [
     '-p',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
-    '--system-prompt', sistema,
+    '--system-prompt-file', arqSistema,
     '--tools', [...ferramentas, ...leitura].join(','),
     '--no-session-persistence',
     '--strict-mcp-config',
@@ -121,7 +126,12 @@ async function perguntar({ conteudo, sistema, schema, ferramentas = [], tarefa, 
   if (esforco) args.push('--effort', esforco);
 
   const entrada = JSON.stringify({ type: 'user', message: { role: 'user', content: conteudo } }) + '\n';
-  const saida = await executar(comando, args, entrada, timeoutMs, cwd);
+  let saida;
+  try {
+    saida = await executar(comando, args, entrada, timeoutMs, cwd);
+  } finally {
+    fs.rmSync(arqSistema, { force: true });
+  }
 
   const linhas = saida.trim().split('\n');
   const final = linhas.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((e) => e?.type === 'result').pop();
