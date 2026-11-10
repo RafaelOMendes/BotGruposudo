@@ -1137,8 +1137,13 @@ async function iniciar() {
     }
     const aFavor = c[e.opcaoAprova] || 0;
     const outras = Math.max(0, ...e.opcoes.filter((o) => o !== e.opcaoAprova).map((o) => c[o] || 0));
-    const aprovou = e.regra === 'maioria_do_grupo' ? aFavor >= e.limite : fimDoPrazo && aFavor > outras;
-    if (!aprovou && !fimDoPrazo) return;
+    // Quem ainda não votou: se nem com todos eles o resultado muda, decide na hora (não espera o prazo).
+    const restantes = Math.max(0, (e.membros || 0) - pessoas);
+    const aprovou = e.regra === 'maioria_do_grupo'
+      ? aFavor >= e.limite
+      : aFavor > outras + restantes || (fimDoPrazo && aFavor > outras);
+    const semChance = e.regra === 'maioria_do_grupo' ? aFavor + restantes < e.limite : aFavor + restantes <= outras;
+    if (!aprovou && !fimDoPrazo && !semChance) return;
     encerrar(e.id, `${aprovou ? 'aprovada' : 'rejeitada'} (${placar})`);
     if (!aprovou) {
       await enviar(`Enquete encerrada e não aprovada${e.regra === 'maioria_do_grupo' ? ` (precisava de ${e.limite} votos em "${e.opcaoAprova}")` : ''}. Não vou fazer nada.\n${placar}`);
@@ -1155,7 +1160,9 @@ async function iniciar() {
       await enviar(`Enquete aprovada, mas não consegui: ${err.message}.`);
     }
   }
-  avaliarEnquetes = () => Promise.all(enquetesAbertas().filter((e) => Date.now() >= e.expiraEm).map((e) => avaliarEnquete(e, true).catch((err) => log('Erro ao encerrar enquete:', err.message))));
+  // A cada minuto: encerra as vencidas e decide as que já não têm como virar (inclusive as que ganharam
+  // votos enquanto o bot estava desligado ou antes desta regra existir).
+  avaliarEnquetes = () => Promise.all(enquetesAbertas().map((e) => avaliarEnquete(e, Date.now() >= e.expiraEm).catch((err) => log('Erro ao conferir enquete:', err.message))));
 
   async function tratarVoto(m) {
     const e = registrarVoto(m);
