@@ -1063,12 +1063,13 @@ async function iniciar() {
     try { fs.writeFileSync(ARQ_SAIDAS, JSON.stringify(saidas)); } catch { /* tenta na próxima */ }
   }
   /** Manda no privado as mensagens do grupo desde que a pessoa saiu (ou desde `desde`). */
-  async function mandarHistorico(jid, destino, desde, meta) {
+  async function mandarHistorico(jid, destino, desde, meta, ate = 0) {
     // As mensagens guardadas têm a hora em SEGUNDOS (messageTimestamp); saídas e pedidos, em ms.
     const inicio = Math.floor((saidas[`${jid}|${digitos(destino)}`] || desde || 0) / 1000);
+    const fim = ate ? Math.floor(ate / 1000) : Infinity;
     const itens = [];
     for (const g of mensagensGuardadas.values()) {
-      if (g.key.remoteJid !== jid || (g.em || 0) < inicio) continue;
+      if (g.key.remoteJid !== jid || (g.em || 0) < inicio || (g.em || 0) > fim) continue;
       const texto = resumo(conteudo(g));
       if (texto) itens.push({ em: g.em || 0, nome: g.key.fromMe ? 'Bot' : g.nome || nomeDaPessoa(g.key.participant, g.key.participantAlt) || 'alguém', texto: semRotulo(texto) });
     }
@@ -1285,6 +1286,14 @@ async function iniciar() {
   // Executa as ações com timer que chegaram na hora.
   rodarAgendadas = async () => {
     for (const a of vencidas()) {
+      // Só mandar o histórico do grupo no privado de alguém ({ historico: { para, desde, ate } }).
+      if (a.historico) {
+        try {
+          const n = await mandarHistorico(a.jid, a.historico.para, a.historico.desde, await metadadosGrupo(a.jid).catch(() => null), a.historico.ate);
+          log(`Agendado (de ${a.pedidoPor}): mandei ${n} mensagem(ns) do histórico para ${a.historico.para}.`);
+        } catch (e) { log(`Agendado (de ${a.pedidoPor}): histórico para ${a.historico.para} não deu (${e.message}).`); }
+        continue;
+      }
       const enviar = async (texto) => guardarEnviada(await sock.sendMessage(a.jid, { text: marcaServico('Agendado', texto), mentions: mencoesDoTexto(texto, await metadadosGrupo(a.jid).catch(() => null)) }));
       try {
         let texto = a.mensagem || '';
