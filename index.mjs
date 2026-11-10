@@ -1143,7 +1143,23 @@ async function iniciar() {
       const r = await sock.groupParticipantsUpdate(jid, alvos, { remover: 'remove', adicionar: 'add', promover_admin: 'promote', tirar_admin: 'demote' }[a.acao]);
       groupCache.del(jid);
       let falhas = (r || []).filter((x) => String(x.status) !== '200');
-      const deram = alvos.filter((j) => !falhas.some((x) => digitos(x.jid) === digitos(j)));
+      // O WhatsApp responde com o LID da pessoa e o alvo pode ser o número (ou o contrário): compara
+      // os dois lados pelo número de telefone.
+      const paraNumero = async (j) => {
+        const n = jidNormalizedUser(j || '');
+        if (!n.endsWith('@lid')) return digitos(n);
+        const p = participante(digitos(n));
+        if (p?.phoneNumber) return digitos(jidNormalizedUser(p.phoneNumber));
+        const pn = await sock.signalRepository?.lidMapping?.getPNForLID?.(n).catch(() => null);
+        return digitos(pn ? jidNormalizedUser(pn) : n);
+      };
+      const numAlvo = new Map();
+      for (const j of alvos) numAlvo.set(j, await paraNumero(j));
+      for (const x of falhas) x.numero = await paraNumero(x.jid);
+      const mesmo = (x, j) => x.numero === numAlvo.get(j) || digitos(x.jid) === digitos(j);
+      const deram = alvos.filter((j) => !falhas.some((x) => mesmo(x, j)));
+      // Para dizer o nome de quem não deu: o alvo correspondente (é o id que se conhece).
+      for (const x of falhas) x.alvo = alvos.find((j) => mesmo(x, j)) || x.jid;
       if (a.acao === 'remover') {
         for (const j of deram) {
           const p = participante(digitos(jidNormalizedUser(j)));
@@ -1162,7 +1178,7 @@ async function iniciar() {
         if (bloqueados.length) {
           const link = `https://chat.whatsapp.com/${await sock.groupInviteCode(jid)}`;
           for (const x of bloqueados) {
-            const destino = alvos.find((j) => digitos(j) === digitos(x.jid)) || x.jid;
+            const destino = x.alvo;
             try {
               await sock.sendMessage(destino, { text: `Te chamaram de volta pro grupo *${meta.subject}*. Entra por aqui: ${link}` });
               log(`Admin: não deu para adicionar ${destino} direto (privacidade); mandei o link no privado.`);
@@ -1182,12 +1198,12 @@ async function iniciar() {
       };
       const nomeDoAlvo = (j) => nomeDaPessoa(j, `${digitos(j)}@lid`, `${digitos(j)}@s.whatsapp.net`) || `+${digitos(j)}`;
       if (falhas.length === alvos.length) {
-        throw new Error(alvos.length === 1 ? motivo(falhas[0]?.status) : falhas.map((x) => `${nomeDoAlvo(x.jid)} ${motivo(x.status)}`).join('; '));
+        throw new Error(alvos.length === 1 ? motivo(falhas[0]?.status) : falhas.map((x) => `${nomeDoAlvo(x.alvo)} ${motivo(x.status)}`).join('; '));
       }
       // Deu para uns e não para outros: o bot diz exatamente quem (o texto do Claude supunha que deu para todos).
       const verbo = { remover: 'Removido(s)', adicionar: 'Adicionado(s)', promover_admin: 'Agora admin', tirar_admin: 'Sem admin' }[a.acao];
       const resumoParcial = falhas.length
-        ? `${verbo}: ${deram.map(nomeDoAlvo).join(', ')}.\nNão deu: ${falhas.map((x) => `${nomeDoAlvo(x.jid)} (${motivo(x.status)})`).join(', ')}.`
+        ? `${verbo}: ${deram.map(nomeDoAlvo).join(', ')}.\nNão deu: ${falhas.map((x) => `${nomeDoAlvo(x.alvo)} (${motivo(x.status)})`).join(', ')}.`
         : '';
       return { detalhe: `${a.acao} ${alvos.length - falhas.length}/${alvos.length}`, resumoParcial };
     }
