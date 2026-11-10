@@ -1020,8 +1020,13 @@ async function iniciar() {
       const numeros = [...new Set((a.pessoas || []).map(digitos).filter((n) => n.length >= 8))];
       for (const n of numeros) {
         const p = participante(n);
-        if (p) alvos.push(p.id);
-        else if (a.acao === 'adicionar') alvos.push(`${n}@s.whatsapp.net`);
+        if (p && a.acao !== 'adicionar') { alvos.push(p.id); continue; }
+        if (p) { alvos.push(p.phoneNumber || p.id); continue; }
+        if (a.acao !== 'adicionar') continue;
+        // Quem saiu do grupo só é conhecido pelo LID (o id que aparece no "@"): para adicionar
+        // precisa do número de telefone, que o WhatsApp guarda no mapa LID → número.
+        const pn = await sock.signalRepository?.lidMapping?.getPNForLID?.(`${n}@lid`).catch(() => null);
+        alvos.push(pn ? jidNormalizedUser(pn) : `${n}@s.whatsapp.net`);
       }
       // Sem número: quem foi marcado na mensagem, ou o autor da mensagem respondida.
       if (!alvos.length && a.acao !== 'adicionar') alvos = outrosMarcados.length ? [...outrosMarcados] : ctx?.participant ? [ctx.participant] : [];
@@ -1029,7 +1034,23 @@ async function iniciar() {
       if (!alvos.length) throw new Error('não achei quem é a pessoa no grupo');
       const r = await sock.groupParticipantsUpdate(jid, alvos, { remover: 'remove', adicionar: 'add', promover_admin: 'promote', tirar_admin: 'demote' }[a.acao]);
       groupCache.del(jid);
-      const falhas = (r || []).filter((x) => String(x.status) !== '200');
+      let falhas = (r || []).filter((x) => String(x.status) !== '200');
+      // Privacidade da pessoa não deixa adicionar direto (403): manda o link do grupo no privado dela.
+      if (a.acao === 'adicionar') {
+        const bloqueados = falhas.filter((x) => String(x.status) === '403');
+        if (bloqueados.length) {
+          const link = `https://chat.whatsapp.com/${await sock.groupInviteCode(jid)}`;
+          for (const x of bloqueados) {
+            const destino = alvos.find((j) => digitos(j) === digitos(x.jid)) || x.jid;
+            try {
+              await sock.sendMessage(destino, { text: `Te chamaram de volta pro grupo *${meta.subject}*. Entra por aqui: ${link}` });
+              log(`Admin: não deu para adicionar ${destino} direto (privacidade); mandei o link no privado.`);
+            } catch (e) { log(`Admin: não deu nem para mandar o link para ${destino} (${e.message}).`); }
+          }
+          falhas = falhas.filter((x) => String(x.status) !== '403');
+          if (!falhas.length) return { detalhe: `convite mandado no privado (${bloqueados.length})`, parcial: 'A privacidade não deixa adicionar direto, então mandei o link do grupo no privado.' };
+        }
+      }
       if (falhas.length === alvos.length) {
         const st = String(falhas[0]?.status);
         throw new Error(st === '403' && a.acao === 'adicionar' ? 'a privacidade da pessoa não deixa adicionar direto (manda o link do grupo pra ela)'

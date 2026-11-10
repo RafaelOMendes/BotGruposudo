@@ -70,7 +70,12 @@ function executar(cmd, args, entrada, timeoutMs, cwd) {
       clearTimeout(timer);
       limpar();
       if (code === 0) resolve(out);
-      else reject(new Error(`claude saiu com código ${code}: ${err.slice(0, 300)}`));
+      else {
+        // O motivo (ex: limite de uso) costuma vir no stdout, num evento "result" em JSON.
+        const motivo = out.trim().split('\n').reverse().map((l) => { try { const j = JSON.parse(l); return j.result || j.error?.message || j.message?.content?.[0]?.text || ''; } catch { return ''; } }).find(Boolean)
+          || err.trim() || out.trim().slice(-300);
+        reject(new Error(`claude saiu com código ${code}: ${String(motivo).slice(0, 300)}`));
+      }
     });
     p.stdin.end(entrada);
   });
