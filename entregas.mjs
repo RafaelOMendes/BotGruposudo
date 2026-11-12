@@ -63,10 +63,16 @@ function dataIcs({ valor, params }) {
   return new Date(z ? utc : utc - FUSO_MS); // sem "Z" (TZID=...): trata como horário de Brasília
 }
 
-async function buscarIcs(url, fonte) {
-  const r = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-  if (!r.ok) throw new Error(`${fonte} respondeu ${r.status}`);
-  const texto = await r.text();
+// `origem` é um link (https://...) ou um arquivo .ics exportado (caminho absoluto ou relativo à pasta do bot).
+async function buscarIcs(origem, fonte) {
+  let texto;
+  if (/^https?:\/\//i.test(origem)) {
+    const r = await fetch(origem, { signal: AbortSignal.timeout(30_000) });
+    if (!r.ok) throw new Error(`${fonte} respondeu ${r.status}`);
+    texto = await r.text();
+  } else {
+    texto = fs.readFileSync(path.resolve(DIR, origem), 'utf8');
+  }
   if (!texto.includes('BEGIN:VCALENDAR')) throw new Error(`${fonte} não devolveu um calendário (link expirou?)`);
   return lerIcs(texto).map((e) => {
     const prazo = dataIcs(e.DTEND || e.DTSTART || { valor: '' });
@@ -87,11 +93,19 @@ async function buscarIcs(url, fonte) {
 export async function buscarAtividades(cfg, log = console.log, { diasClassroom = 3 } = {}) {
   const fontes = [];
   if (cfg.moodle) fontes.push(['Moodle', () => buscarIcs(cfg.moodle, 'Moodle')]);
-  for (const [i, c] of (cfg.calendarios || []).entries()) fontes.push([c.nome || `Calendário ${i + 1}`, () => buscarIcs(c.url, c.nome || 'Calendário')]);
+  // { nome, url | arquivo, fonte? }: `fonte` é o que aparece no aviso ("Moodle"); calendários de colegas da
+  // mesma faculdade usam fonte "Moodle" para que a mesma atividade em dois calendários vire um aviso só.
+  for (const [i, c] of (cfg.calendarios || []).entries()) {
+    const nome = c.nome || `Calendário ${i + 1}`;
+    fontes.push([nome, () => buscarIcs(c.url || c.arquivo, c.fonte || nome)]);
+  }
   if (cfg.classroom?.clientId && classroomConectado()) fontes.push(['Classroom', () => buscarClassroom(cfg.classroom, { dias: diasClassroom })]);
   const todas = [];
+  const vistos = new Set();
   for (const [nome, buscar] of fontes) {
-    try { todas.push(...(await buscar())); } catch (e) { log(`Entregas: não deu para ler ${nome} (${e.message}).`); }
+    try {
+      for (const a of await buscar()) if (!vistos.has(a.id)) { vistos.add(a.id); todas.push(a); }
+    } catch (e) { log(`Entregas: não deu para ler ${nome} (${e.message}).`); }
   }
   return todas;
 }

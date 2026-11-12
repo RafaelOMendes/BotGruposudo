@@ -48,6 +48,11 @@
       {
         "nome": "Outro calendário",
         "url": "https://.../basic.ics"
+      },
+      {
+        "nome": "Moodle de um colega (arquivo exportado)",
+        "arquivo": "calendarios/colega.ics",
+        "fonte": "Moodle"
       }
     ],
     "classroom": {
