@@ -282,6 +282,9 @@ export async function sincronizarMateriais(cfg, { log = console.log, rapido = fa
         log(`Classroom: ${c.name}: não deu para ler "${titulo}" (${e.message}).`);
       }
     }
+    // Arquivos colocados à mão na pasta da turma (ex: plano de ensino que não está no Classroom):
+    // nome começando com "Manual - ". A sincronização não mexe neles, só lista.
+    for (const f of fs.readdirSync(pasta)) if (f.startsWith('Manual - ') && !arquivosDaTurma.includes(f)) arquivosDaTurma.push(f);
     indice.push(`${turma}/ → ${arquivosDaTurma.join(' | ')}`);
   }
   fs.writeFileSync(ESTADO_MATERIAIS, JSON.stringify(novoEstado));
