@@ -1,6 +1,6 @@
 // Regras criadas pelo próprio grupo ("quando o Bernardo mandar X, faça Y"), salvas em regras.json.
-// As ações possíveis são só mandar mensagens (texto, resposta da IA, meme, figurinha, áudio):
-// nenhuma regra executa código ou mexe no PC.
+// As ações possíveis são mandar mensagens (texto, resposta da IA, meme, figurinha, áudio) ou apagar a
+// mensagem que disparou (o bot é admin): nenhuma regra executa código ou mexe no PC.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -39,7 +39,7 @@ export class Regras {
    * @param {{nome: string, ids: string[]}} remetente quem dispara (ids vêm de @menções na mensagem)
    * @param {string} criadoPor
    */
-  criar(jid, v, remetente, criadoPor) {
+  criar(jid, v, remetente, criadoPor, { figurinha = null } = {}) {
     if (this.doGrupo(jid).length >= MAX_POR_GRUPO) return { ok: false, erro: `limite de ${MAX_POR_GRUPO} regras no grupo` };
     const temTexto = v.regra_texto_modo !== 'nenhum' && v.regra_texto_valor.trim();
     if (!remetente.nome && !remetente.ids.length && v.regra_tipo_mensagem === 'qualquer' && !temTexto) {
@@ -49,6 +49,12 @@ export class Regras {
       return { ok: false, erro: 'condição de texto curta demais para qualquer pessoa' };
     }
     if (v.regra_acao_tipo === 'texto' && !v.regra_acao_conteudo.trim()) return { ok: false, erro: 'regra de texto sem texto' };
+    if (v.regra_so_figurinha_citada && !figurinha) return { ok: false, erro: 'responda a figurinha que é para a regra valer' };
+    const apagar = v.regra_acao_tipo === 'apagar';
+    // Apagar precisa de algo específico: a figurinha, um texto, ou um tipo de mensagem de uma pessoa.
+    if (apagar && !figurinha && !temTexto && !(v.regra_tipo_mensagem !== 'qualquer' && (remetente.nome || remetente.ids.length))) {
+      return { ok: false, erro: 'regra de apagar ampla demais (diga a figurinha, a palavra ou o tipo de mensagem)' };
+    }
 
     const regra = {
       id: crypto.randomBytes(3).toString('hex'),
@@ -57,10 +63,11 @@ export class Regras {
       criadoPor,
       criadoEm: new Date().toISOString(),
       remetente: { nome: remetente.nome.slice(0, 60), ids: remetente.ids },
-      tipoMensagem: v.regra_tipo_mensagem,
+      tipoMensagem: figurinha ? 'figurinha' : v.regra_tipo_mensagem,
+      figurinha: figurinha || null, // sha256 do arquivo: só essa figurinha dispara
       texto: temTexto ? { modo: v.regra_texto_modo, valor: v.regra_texto_valor.slice(0, 200) } : null,
       acao: { tipo: v.regra_acao_tipo, conteudo: v.regra_acao_conteudo.slice(0, 1000) },
-      intervaloSeg: 30,
+      intervaloSeg: apagar ? 0 : 30,
     };
     this.lista.push(regra);
     this.salvar();
@@ -77,12 +84,13 @@ export class Regras {
 
   /**
    * Regras que batem com a mensagem (respeitando o intervalo de cada uma).
-   * @param {object} msg { jid, tipo, texto, autorIds: string[], autorNome }
+   * @param {object} msg { jid, tipo, texto, autorIds: string[], autorNome, figurinha (sha256 ou null) }
    */
   disparadas(msg) {
     const agora = Date.now();
     return this.doGrupo(msg.jid).filter((r) => {
       if (r.tipoMensagem !== 'qualquer' && r.tipoMensagem !== msg.tipo) return false;
+      if (r.figurinha && r.figurinha !== msg.figurinha) return false;
 
       if (r.remetente.ids.length) {
         if (!r.remetente.ids.some((id) => msg.autorIds.includes(id))) return false;
@@ -102,7 +110,7 @@ export class Regras {
         if (r.texto.modo === 'comeca' && !t.startsWith(v)) return false;
       }
 
-      if (agora - (this.ultimoDisparo.get(r.id) || 0) < (r.intervaloSeg || 30) * 1000) return false;
+      if (agora - (this.ultimoDisparo.get(r.id) || 0) < (r.intervaloSeg ?? 30) * 1000) return false;
       this.ultimoDisparo.set(r.id, agora);
       return true;
     });

@@ -817,7 +817,8 @@ async function iniciar() {
         if (v.acao === 'responder' && Array.isArray(v.anexos)) anexos = v.anexos.filter((a) => a?.url).slice(0, 3);
         if (v.acao === 'criar_regra') {
           const remetente = { nome: v.regra_remetente || '', ids: v.regra_remetente ? outrosMarcados : [] };
-          const r = regras.criar(jid, v, remetente, autor);
+          const figurinha = v.regra_so_figurinha_citada ? shaFigurinha(ctx?.quotedMessage?.stickerMessage || conteudo(m).stickerMessage) : null;
+          const r = regras.criar(jid, v, remetente, autor, { figurinha });
           if (r.ok) {
             log(`Regra ${r.regra.id} criada por ${autor}: ${r.regra.descricao}`);
             servico = 'Regra criada';
@@ -1484,6 +1485,14 @@ async function iniciar() {
     return null;
   }
 
+  // Impressão do arquivo da figurinha (a mesma figurinha mandada de novo tem o mesmo sha256).
+  function shaFigurinha(s) {
+    const h = s?.fileSha256;
+    if (!h) return null;
+    if (typeof h === 'string') return h;
+    return Buffer.from(h instanceof Uint8Array ? h : Object.values(h)).toString('base64');
+  }
+
   async function aplicarRegras(m, jid, meta) {
     const c = conteudo(m);
     const tipo = tipoDaMensagem(c);
@@ -1491,7 +1500,7 @@ async function iniciar() {
     const autor = m.pushName || digitos(m.key.participant || '');
     const texto = textoDa(m);
     const disparadas = regras.disparadas({
-      jid, tipo, texto, autorNome: autor,
+      jid, tipo, texto, autorNome: autor, figurinha: shaFigurinha(c.stickerMessage),
       autorIds: [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser),
     });
     if (!disparadas.length) return false;
@@ -1501,6 +1510,11 @@ async function iniciar() {
       log(`Regra ${regra.id} disparada por ${autor}: ${regra.descricao}`);
       const executar = async () => {
         const { tipo: acao, conteudo: arg } = regra.acao;
+        if (acao === 'apagar') {
+          await sock.sendMessage(jid, { delete: { remoteJid: jid, id: m.key.id, fromMe: false, participant: m.key.participant } });
+          log(`Regra ${regra.id}: apaguei a mensagem de ${autor}.`);
+          return;
+        }
         const imagens = c.imageMessage || c.stickerMessage ? [await baixar(m)] : [];
         if (acao === 'texto') {
           guardarEnviada(await sock.sendMessage(jid, { text: arg }, { quoted: m }));

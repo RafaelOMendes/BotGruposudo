@@ -289,7 +289,7 @@ export async function falaramComOBot({ grupo, historico, autor, mensagem, botAca
 
 // ---------- marcação (@): responder, criar ou apagar regra ----------
 export const TIPOS_MENSAGEM = ['texto', 'figurinha', 'imagem', 'audio', 'video', 'qualquer'];
-export const TIPOS_ACAO = ['texto', 'ia', 'meme', 'figurinha_padrao', 'audio_gabreu'];
+export const TIPOS_ACAO = ['texto', 'ia', 'meme', 'figurinha_padrao', 'audio_gabreu', 'apagar'];
 
 const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'mensagens_temporarias'];
 const SCHEMA_ADMIN = (descricao) => ({
@@ -334,6 +334,7 @@ const SCHEMA_MENCAO = {
     regra_texto_valor: { type: 'string' },
     regra_acao_tipo: { type: 'string', enum: TIPOS_ACAO },
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
+    regra_so_figurinha_citada: { type: 'boolean', description: 'true = a regra vale só para AQUELA figurinha (a que a pessoa respondeu/citou no pedido)' },
     regra_apagar_id: { type: 'string' },
     precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
     admin: SCHEMA_ADMIN('função de ADMIN do grupo para o bot executar AGORA (acao "nenhuma" se não pediram)'),
@@ -413,7 +414,7 @@ const SCHEMA_MENCAO = {
   },
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
-    'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_apagar_id', 'anexos',
+    'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_so_figurinha_citada', 'regra_apagar_id', 'anexos',
     'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete', 'agendadas',
   ],
   additionalProperties: false,
@@ -484,6 +485,9 @@ confirmação e sem se recusar (preencha "admin"; senão admin.acao = "nenhuma",
     aprovar_entrada_ligar / aprovar_entrada_desligar, link_convite (manda o link), trocar_link
     (revoga e gera outro), apagar_mensagem (apaga para todos a mensagem RESPONDIDA),
     mensagens_temporarias (tempo).
+  Apagar AUTOMATICAMENTE daqui para frente ("sempre que o Bernardo mandar essa figurinha, apaga", "apaga
+  toda mensagem com a palavra X") = acao "criar_regra" com regra_acao_tipo "apagar". Se pedirem para apagar
+  a respondida agora E as próximas, faça os dois (admin apagar_mensagem + criar_regra).
   Pedido direto para você = faça, mesmo de zoeira ("bot remove o Nicolas kkkk"). Comentário SOBRE o bot
   não é pedido ("esse bot devia remover o Nicolas", "imagina se o bot banisse ele"). Se não der para saber
   quem é a pessoa, pergunte. Nunca remova nem rebaixe você mesmo. O "texto" da resposta confirma o que
@@ -557,7 +561,12 @@ mostrar alguma coisa (notícia, placar, preço, link, informação, imagem, meme
     - "ia": o bot escreve uma resposta na hora seguindo a instrução (regra_acao_conteudo = instrução);
     - "meme": o bot monta um meme zoando, seguindo a instrução (regra_acao_conteudo = instrução, pode ser "");
     - "figurinha_padrao": manda a figurinha clássica "manda figurinha de gente animal";
-    - "audio_gabreu": manda o áudio clássico do Gabreu.
+    - "audio_gabreu": manda o áudio clássico do Gabreu;
+    - "apagar": o bot (que é admin) APAGA a mensagem que disparou a regra, sem responder nada. Você CONSEGUE
+      fazer isso: "sempre que o Bernardo mandar essa figurinha, apaga" ou "apaga toda mensagem com a palavra X"
+      viram regra com acao "apagar". Nunca diga que regra só responde ou manda conteúdo.
+  - regra_so_figurinha_citada: true quando a regra é sobre UMA figurinha específica ("essa figurinha",
+    respondendo a figurinha); aí só ela dispara (o bot reconhece o arquivo). Senão false.
   Recuse (com "responder") regras vagas demais que fariam o bot responder quase toda mensagem do grupo
   (qualquer pessoa + qualquer mensagem sem condição) e regras para spam. No "texto", confirme a regra criada
   de um jeito curto e zoeiro.
