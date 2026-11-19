@@ -302,11 +302,12 @@ const SCHEMA_ADMIN = (descricao) => ({
   properties: {
     acao: { type: 'string', enum: ACOES_ADMIN },
     pessoas: { type: 'array', items: { type: 'string' }, description: 'números das pessoas (como aparecem em "Pessoas do grupo", sem @); adicionar: número com DDI e DDD (ex: 5551999998888); [] se não for com pessoas' },
-    texto: { type: 'string', description: 'mudar_nome/mudar_descricao: o novo texto; senão ""' },
+    texto: { type: 'string', description: 'mudar_nome/mudar_descricao: o novo texto; mandar_historico (ou adicionar com histórico): recado curto que vai junto no privado da pessoa (zoeira leve se pediram, ex: "Toma, betinha"), ou ""; senão ""' },
     tempo: { type: 'string', enum: ['', 'desligar', '24h', '7d', '90d'], description: 'mensagens_temporarias: duração; senão ""' },
     mandar_historico: { type: 'boolean', description: 'adicionar: true = mandar no privado da pessoa as mensagens do grupo desde que ela saiu (como a função do WhatsApp de compartilhar o histórico); senão false' },
+    historico_completo: { type: 'boolean', description: 'mandar_historico (ou adicionar com mandar_historico): true = TODO o histórico, de TODAS as vezes que a pessoa ficou fora (cada saída/remoção até a volta, num PDF com um cabeçalho por período); false = só o da última saída' },
   },
-  required: ['acao', 'pessoas', 'texto', 'tempo', 'mandar_historico'],
+  required: ['acao', 'pessoas', 'texto', 'tempo', 'mandar_historico', 'historico_completo'],
   additionalProperties: false,
 });
 
@@ -519,7 +520,11 @@ atual), e o que for para agora vai em "admin" como sempre. Ex: "remove e adicion
 "Adiciona e manda o histórico" = admin adicionar com mandar_historico = true (o bot manda no privado
 da pessoa as mensagens desde que ela saiu: você CONSEGUE). Pessoa que JÁ está no grupo ("manda o histórico
 da última remoção dele", "envia o histórico pro Nicolas") = admin acao "mandar_historico" com pessoas: o bot
-manda no privado o que rolou entre a última saída e a volta, SEM remover nem adicionar ninguém. "Quando ele
+manda no privado o que rolou entre a última saída e a volta, SEM remover nem adicionar ninguém. "Todo o
+histórico", "de todas as vezes que ele tava fora", "de todas as remoções" = o mesmo com historico_completo
+= true: o bot guarda cada saída e volta e manda um PDF com TODOS os períodos (você CONSEGUE); só "o
+histórico"/"da última remoção" = historico_completo false. Zoeira para ir junto no privado vai em "texto".
+O bot confirma no grupo quantas mensagens e períodos mandou: não invente esses números. "Quando ele
 voltar manda o histórico" com a volta já agendada = agendada adicionar (mesma pessoa, mesmo horário) com
 mandar_historico true: o bot junta com a que já existe, não cria outra. "Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
 sozinho na hora: nunca diga que não consegue agendar. O "texto" da resposta confirma curto (ex:

@@ -585,6 +585,10 @@ async function iniciar() {
     if (u.action === 'add') {
       for (const p of u.participants || []) marcarVolta(u.id, typeof p === 'string' ? [p] : [p.id, p.phoneNumber, p.lid]);
     }
+    // Saiu ou foi removido por alguém no próprio WhatsApp (não pelo bot): também conta como período fora.
+    if (u.action === 'remove') {
+      for (const p of u.participants || []) marcarSaida(u.id, typeof p === 'string' ? [p] : [p.id, p.phoneNumber, p.lid]);
+    }
   });
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
@@ -947,8 +951,9 @@ async function iniciar() {
               }
             }
             if (igual) {
-              if (admin.mandar_historico && !igual.admin.mandar_historico) {
+              if (admin.mandar_historico && (!igual.admin.mandar_historico || (admin.historico_completo && !igual.admin.historico_completo))) {
                 igual.admin.mandar_historico = true;
+                if (admin.historico_completo) Object.assign(igual.admin, { historico_completo: true, texto: admin.texto || igual.admin.texto });
                 salvarAgenda();
                 feitas.push(`${igual.descricao} (já estava agendado; agora manda o histórico junto)`);
               } else feitas.push(`${descreverAcao(admin, meta2)} (já estava agendado)`);
@@ -1289,9 +1294,48 @@ Reiniciando para usar; já volto e faço o pedido.`);
   const ARQ_SAIDAS = path.join(DIR, '.saidas.json');
   let saidas = {};
   try { saidas = JSON.parse(fs.readFileSync(ARQ_SAIDAS, 'utf8')); } catch { /* nenhuma */ }
+  // Todas as vezes que cada pessoa ficou fora ({ "grupo|número": { saidas: [ms], voltas: [ms] } }): o
+  // "histórico completo" junta as mensagens de cada período, da primeira saída até agora.
+  const ARQ_PERIODOS = path.join(DIR, '.periodos-fora.json');
+  let periodos = {};
+  try { periodos = JSON.parse(fs.readFileSync(ARQ_PERIODOS, 'utf8')); } catch { /* nenhum */ }
   function marcarSaida(jid, ids, sufixo = '') {
-    for (const i of ids.filter(Boolean)) saidas[`${jid}|${digitos(jidNormalizedUser(i))}${sufixo}`] = Date.now();
+    const agora = Date.now();
+    const tipo = sufixo ? 'voltas' : 'saidas';
+    for (const i of ids.filter(Boolean)) {
+      const chave = `${jid}|${digitos(jidNormalizedUser(i))}`;
+      saidas[chave + sufixo] = agora;
+      if (!/^\d{8,}$/.test(digitos(jidNormalizedUser(i)))) continue;
+      const lista = ((periodos[chave] ||= { saidas: [], voltas: [] })[tipo] ||= []);
+      // O comando do bot e o aviso do WhatsApp marcam a mesma saída/volta: conta uma vez só.
+      if (!lista.length || agora - lista[lista.length - 1] > 30_000) lista.push(agora);
+      while (lista.length > 300) lista.shift();
+    }
     try { fs.writeFileSync(ARQ_SAIDAS, JSON.stringify(saidas)); } catch { /* tenta na próxima */ }
+    try { fs.writeFileSync(ARQ_PERIODOS, JSON.stringify(periodos)); } catch { /* tenta na próxima */ }
+  }
+  /** Cada período fora da pessoa (todos os ids dela juntos), mais antigo primeiro: [{ saiu, voltou, ate }] em ms. */
+  function periodosFora(jid, ids) {
+    const chaves = [...new Set(ids.filter(Boolean).map((i) => `${jid}|${digitos(jidNormalizedUser(i))}`))];
+    const juntar = (tipo) => [...new Set(chaves.flatMap((k) => periodos[k]?.[tipo] || []))].sort((x, y) => x - y)
+      .filter((t, i, l) => !i || t - l[i - 1] > 30_000);
+    const saiu = juntar('saidas');
+    const voltas = juntar('voltas');
+    return saiu.map((s, i) => {
+      const proxima = saiu[i + 1] || Infinity;
+      const voltou = voltas.find((v) => v > s && v <= proxima) || null;
+      // Sem volta registrada: vai até a saída seguinte (ou até agora, se ainda está fora).
+      return { saiu: s, voltou, ate: voltou || (proxima < Infinity ? proxima : Date.now()) };
+    });
+  }
+  // Todos os ids (LID e número) da mesma pessoa, para achar as saídas marcadas por qualquer um deles.
+  async function idsDaPessoa(j, meta) {
+    const d = digitos(jidNormalizedUser(j));
+    const p = (meta?.participants || []).find((x) => [x.id, x.lid, x.phoneNumber].filter(Boolean).some((i) => digitos(jidNormalizedUser(i)) === d));
+    const ids = [j, p?.id, p?.lid, p?.phoneNumber];
+    const mapa = sock.signalRepository?.lidMapping;
+    ids.push(await mapa?.getPNForLID?.(`${d}@lid`).catch(() => null), await mapa?.getLIDForPN?.(`${d}@s.whatsapp.net`).catch(() => null));
+    return [...new Set(ids.filter(Boolean).map((i) => jidNormalizedUser(String(i))))];
   }
   /** Manda no privado as mensagens do grupo desde que a pessoa saiu (ou desde `desde`). */
   // Número de telefone de alguém (vindo como LID ou número), para comparar a mesma pessoa.
@@ -1313,7 +1357,55 @@ Reiniciando para usar; já volto e faço o pedido.`);
     if (!ate && saiu && voltou > saiu) ate = voltou;
     const inicio = Math.floor((saiu || desde || 0) / 1000);
     const fim = ate ? Math.floor(ate / 1000) : Infinity;
-    const eDestino = (...ids) => ids.filter(Boolean).some((i) => digitos(jidNormalizedUser(i)) === digitos(destino));
+    const ultimas = mensagensEntre(jid, [digitos(destino)], inicio, fim).slice(-300);
+    const desdeTxt = inicio ? dataHora(inicio) : '';
+    const pdf = await gerarPdfConversa({
+      titulo: meta?.subject || 'Grupo',
+      subtitulo: `O que rolou enquanto você estava fora${desdeTxt ? ` (desde ${desdeTxt})` : ''}: ${ultimas.length} mensagem(ns)`,
+      mensagens: ultimas,
+    }, { navegador: local.navegador });
+    await sock.sendMessage(destino, {
+      document: pdf, mimetype: 'application/pdf', fileName: nomeDoArquivo(meta, 'o que você perdeu'),
+      caption: `📜 O que rolou no grupo *${meta?.subject || ''}* enquanto você estava fora${desdeTxt ? ` (desde ${desdeTxt})` : ''}: ${ultimas.length ? `${ultimas.length} mensagem(ns)` : 'ninguém mandou nada'}.`,
+    });
+    return ultimas.length;
+  }
+
+  /**
+   * Histórico de TODAS as vezes que a pessoa ficou fora (cada saída/remoção até a volta), num PDF só, em
+   * ordem, com um cabeçalho por período. `recado` vai junto no privado. Devolve { mensagens, periodos, vazios }.
+   */
+  async function mandarHistoricoCompleto(jid, destino, ids, meta, recado = '') {
+    const lista = periodosFora(jid, ids);
+    if (!lista.length) throw new Error(`não tenho registro de nenhuma saída de ${nomeDaPessoa(destino) || 'a pessoa'}`);
+    const meus = ids.map((i) => digitos(jidNormalizedUser(i)));
+    const itens = [];
+    let total = 0;
+    let vazios = 0;
+    lista.forEach((p, i) => {
+      const msgs = mensagensEntre(jid, meus, Math.floor(p.saiu / 1000), Math.ceil(p.ate / 1000));
+      total += msgs.length;
+      if (!msgs.length) vazios++;
+      const volta = p.voltou ? `voltou ${dataHora(p.voltou / 1000)}` : p.ate < Date.now() - 5000 ? 'volta não registrada' : 'ainda fora';
+      itens.push({ separador: `${i + 1}ª vez fora: saiu ${dataHora(p.saiu / 1000)}, ${volta} (${msgs.length ? `${msgs.length} mensagem(ns)` : 'nada registrado nesse período'})` });
+      itens.push(...msgs.slice(-500));
+    });
+    const pdf = await gerarPdfConversa({
+      titulo: meta?.subject || 'Grupo',
+      subtitulo: `Tudo o que rolou nas ${lista.length} vez(es) que você ficou fora: ${total} mensagem(ns)`,
+      mensagens: itens,
+    }, { navegador: local.navegador });
+    const quando = lista.map((p) => `${dataHora(p.saiu / 1000)} → ${p.voltou ? dataHora(p.voltou / 1000) : '?'}`).join(', ');
+    await sock.sendMessage(destino, {
+      document: pdf, mimetype: 'application/pdf', fileName: nomeDoArquivo(meta, 'tudo o que você perdeu'),
+      caption: [String(recado || '').trim(), `📜 Tudo o que rolou no grupo *${meta?.subject || ''}* nas ${lista.length} vez(es) que você ficou fora (${quando}): ${total ? `${total} mensagem(ns)` : 'ninguém mandou nada'}.${vazios && total ? ` Em ${vazios} delas não tem nada registrado.` : ''}`].filter(Boolean).join('\n\n'),
+    });
+    return { mensagens: total, periodos: lista.length, vazios };
+  }
+
+  /** Mensagens do grupo entre `inicio` e `fim` (em segundos), no formato do PDF; `meus` = números de quem recebe. */
+  function mensagensEntre(jid, meus, inicio, fim) {
+    const eDestino = (...ids) => ids.filter(Boolean).some((i) => meus.includes(digitos(jidNormalizedUser(i))));
     const nomeDe = (key, nome) => (key?.fromMe ? 'Bot' : nome || nomeDaPessoa(key?.participant, key?.participantAlt) || 'alguém');
     const itens = [];
     for (const g of mensagensGuardadas.values()) {
@@ -1336,20 +1428,9 @@ Reiniciando para usar; já volto e faço o pedido.`);
         miniatura: midia?.jpegThumbnail || midia?.pngThumbnail || null,
       });
     }
-    itens.sort((a, b) => a.em - b.em);
-    const ultimas = itens.slice(-300);
-    const desdeTxt = inicio ? dataHora(inicio) : '';
-    const pdf = await gerarPdfConversa({
-      titulo: meta?.subject || 'Grupo',
-      subtitulo: `O que rolou enquanto você estava fora${desdeTxt ? ` (desde ${desdeTxt})` : ''}: ${ultimas.length} mensagem(ns)`,
-      mensagens: ultimas,
-    }, { navegador: local.navegador });
-    await sock.sendMessage(destino, {
-      document: pdf, mimetype: 'application/pdf', fileName: `${(meta?.subject || 'Grupo').replace(/[\\/:*?"<>|]+/g, ' ').trim()} - o que você perdeu.pdf`,
-      caption: `📜 O que rolou no grupo *${meta?.subject || ''}* enquanto você estava fora${desdeTxt ? ` (desde ${desdeTxt})` : ''}: ${ultimas.length ? `${ultimas.length} mensagem(ns)` : 'ninguém mandou nada'}.`,
-    });
-    return ultimas.length;
+    return itens.sort((a, b) => a.em - b.em);
   }
+  const nomeDoArquivo = (meta, fim) => `${(meta?.subject || 'Grupo').replace(/[\\/:*?"<>|]+/g, ' ').trim()} - ${fim}.pdf`;
 
   const DURACAO = { desligar: 0, '24h': 86400, '7d': 7 * 86400, '90d': 90 * 86400 };
 
@@ -1439,8 +1520,12 @@ Reiniciando para usar; já volto e faço o pedido.`);
         // Quem "já está no grupo" (voltou pelo link antes da hora) também recebe o histórico pedido.
         const jaDentro = falhas.filter((x) => String(x.status) === '409').map((x) => x.alvo);
         for (const j of [...deram, ...jaDentro]) {
-          try { log(`Admin: mandei ${await mandarHistorico(jid, jidNormalizedUser(j), a.historico_desde, meta)} mensagem(ns) do histórico para ${j}.`); }
-          catch (e) { log(`Admin: não deu para mandar o histórico para ${j} (${e.message}).`); }
+          try {
+            if (a.historico_completo) {
+              const r = await mandarHistoricoCompleto(jid, jidNormalizedUser(j), await idsDaPessoa(j, meta), meta, a.texto);
+              log(`Admin: mandei o histórico completo para ${j}: ${r.mensagens} mensagem(ns) de ${r.periodos} período(s) fora.`);
+            } else log(`Admin: mandei ${await mandarHistorico(jid, jidNormalizedUser(j), a.historico_desde, meta)} mensagem(ns) do histórico para ${j}.`);
+          } catch (e) { log(`Admin: não deu para mandar o histórico para ${j} (${e.message}).`); }
         }
       }
       // Privacidade da pessoa não deixa adicionar direto (403): manda o link do grupo no privado dela.
@@ -1486,6 +1571,17 @@ Reiniciando para usar; já volto e faço o pedido.`);
       destinos = destinos.map(jidNormalizedUser).filter((j) => !meusIds().includes(j));
       if (!destinos.length) throw new Error('não achei para quem mandar o histórico');
       const feitos = [];
+      // "Todo o histórico, de todas as vezes que ele tava fora": um PDF com cada período (saída → volta).
+      if (a.historico_completo) {
+        for (const d of destinos) {
+          const ids = await idsDaPessoa(d, meta);
+          const destino = jidNormalizedUser(ids.find((i) => i.endsWith('@s.whatsapp.net')) || d);
+          const r = await mandarHistoricoCompleto(jid, destino, ids, meta, a.texto);
+          log(`Admin: mandei o histórico completo para ${destino}: ${r.mensagens} mensagem(ns) de ${r.periodos} período(s) fora.`);
+          feitos.push(`${nomeDaPessoa(d) || `+${digitos(d)}`} (${r.mensagens} mensagem(ns) de ${r.periodos} período(s) fora${r.vazios ? `; ${r.vazios} sem nada registrado` : ''})`);
+        }
+        return { detalhe: `histórico completo: ${feitos.join(', ')}`, extra: `📜 Histórico completo mandado no privado: ${feitos.join(', ')}.` };
+      }
       for (const d of destinos) {
         const p = participante(digitos(d));
         const ids = [d, p?.id, p?.lid, p?.phoneNumber].filter(Boolean).map(jidNormalizedUser);
@@ -1546,7 +1642,7 @@ Reiniciando para usar; já volto e faço o pedido.`);
       so_admins_editam_dados: 'deixo só admin editar os dados do grupo', todos_editam_dados: 'deixo todo mundo editar os dados do grupo',
       so_admins_adicionam: 'deixo só admin adicionar gente', todos_adicionam: 'deixo todo mundo adicionar gente',
       aprovar_entrada_ligar: 'ligo a aprovação para entrar', aprovar_entrada_desligar: 'desligo a aprovação para entrar',
-      trocar_link: 'troco o link do grupo', apagar_repetidos_do_bot: 'apago os anexos que mandei repetidos', mandar_historico: `mando o histórico no privado de ${nomes}`, mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
+      trocar_link: 'troco o link do grupo', apagar_repetidos_do_bot: 'apago os anexos que mandei repetidos', mandar_historico: `mando o histórico${a.historico_completo ? ' de todas as vezes que ficou fora' : ''} no privado de ${nomes}`, mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
     }[a.acao] || `faço "${a.acao}"`;
   }
 

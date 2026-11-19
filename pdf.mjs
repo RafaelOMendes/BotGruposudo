@@ -84,7 +84,7 @@ const quebrar = (t) => escapar(t).replace(/\n/g, '<br>').replace(/\*([^*\n]+)\*/
 /**
  * PDF de uma conversa, parecendo o WhatsApp: balões, nomes coloridos, hora, separador de dia,
  * mensagem citada dentro do balão e miniatura de foto/figurinha.
- * @param {object} c { titulo, subtitulo, mensagens: [{ data: Date, nome, texto, minha, citada?: { nome, texto }, miniatura?: Buffer }] }
+ * @param {object} c { titulo, subtitulo, mensagens: [{ data: Date, nome, texto, minha, citada?: { nome, texto }, miniatura?: Buffer } | { separador }] }
  */
 export function gerarPdfConversa({ titulo, subtitulo = '', mensagens }, { navegador } = {}) {
   const dia = (d) => d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -92,6 +92,8 @@ export function gerarPdfConversa({ titulo, subtitulo = '', mensagens }, { navega
   let ultimoDia = '';
   let ultimoNome = '';
   const corpo = mensagens.map((m) => {
+    // Cabeçalho no meio da conversa (ex: cada período que a pessoa ficou fora): repete o dia depois dele.
+    if (m.separador) { ultimoDia = ''; ultimoNome = ''; return `<div class="periodo"><span>${escapar(m.separador)}</span></div>`; }
     let html = '';
     const d = dia(m.data);
     if (d !== ultimoDia) { html += `<div class="dia"><span>${escapar(d)}</span></div>`; ultimoDia = d; ultimoNome = ''; }
@@ -116,6 +118,8 @@ export function gerarPdfConversa({ titulo, subtitulo = '', mensagens }, { navega
   .conversa { padding: 4mm 12mm; }
   .dia { text-align: center; margin: 4mm 0 3mm; break-after: avoid; }
   .dia span { background: #fff; color: #54656f; font-size: 8.5pt; padding: 1.2mm 3mm; border-radius: 2mm; box-shadow: 0 .3mm .4mm rgba(0,0,0,.12); text-transform: capitalize; }
+  .periodo { text-align: center; margin: 7mm 0 2mm; break-after: avoid; }
+  .periodo span { display: inline-block; background: #ffeecd; color: #54656f; font-size: 9pt; font-weight: 600; padding: 1.6mm 4mm; border-radius: 2mm; box-shadow: 0 .3mm .4mm rgba(0,0,0,.12); }
   .linha { display: flex; margin-top: 2.2mm; break-inside: avoid; }
   .linha.seguida { margin-top: .8mm; }
   .linha.minha { justify-content: flex-end; }
