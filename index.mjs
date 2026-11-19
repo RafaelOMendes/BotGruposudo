@@ -593,7 +593,15 @@ async function iniciar() {
     groupCache.del(u.id);
     // Hora em que a pessoa voltou (adicionada ou pelo link): o "histórico da última remoção" vai até aqui.
     if (u.action === 'add') {
-      for (const p of u.participants || []) marcarVolta(u.id, typeof p === 'string' ? [p] : [p.id, p.phoneNumber, p.lid]);
+      for (const p of u.participants || []) {
+        const ids = (typeof p === 'string' ? [p] : [p.id, p.phoneNumber, p.lid]).filter(Boolean);
+        marcarVolta(u.id, ids);
+        // "Histórico na volta" ligado no grupo: quem tinha saído recebe sozinho o que perdeu. Espera um
+        // pouco para o "adicionar com mandar_historico" do próprio bot marcar que já vai mandar.
+        if (historicoNaVolta[u.id] && !ids.some((i) => meusIds().includes(jidNormalizedUser(i)))) {
+          setTimeout(() => mandarHistoricoNaVolta(u.id, ids).catch((e) => log(`Histórico na volta: erro (${e.message}).`)), 8_000);
+        }
+      }
     }
     // Saiu ou foi removido por alguém no próprio WhatsApp (não pelo bot): também conta como período fora.
     if (u.action === 'remove') {
@@ -1365,9 +1373,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
 
   const marcarVolta = (jid, ids) => marcarSaida(jid, ids, '|volta');
 
-  async function mandarHistorico(jid, destino, desde, meta, ate = 0) {
+  async function mandarHistorico(jid, destino, desde, meta, ate = 0, saiuEm = 0) {
     // As mensagens guardadas têm a hora em SEGUNDOS (messageTimestamp); saídas e pedidos, em ms.
-    const saiu = saidas[`${jid}|${digitos(destino)}`];
+    const saiu = saiuEm || saidas[`${jid}|${digitos(destino)}`];
     const voltou = saidas[`${jid}|${digitos(destino)}|volta`];
     // Já voltou depois da última saída (pediram o histórico depois): vai só até a volta.
     if (!ate && saiu && voltou > saiu) ate = voltou;
@@ -1385,6 +1393,58 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       caption: `📜 O que rolou no grupo *${meta?.subject || ''}* enquanto você estava fora${desdeTxt ? ` (desde ${desdeTxt})` : ''}: ${ultimas.length ? `${ultimas.length} mensagem(ns)` : 'ninguém mandou nada'}.`,
     });
     return ultimas.length;
+  }
+
+  // ---------- histórico automático na volta ----------
+  // Grupos com o "histórico na volta" ligado ({ grupo: { completo, desde } }): quem tinha saído ou sido
+  // removido e volta (adicionado ou pelo link) recebe no privado o que rolou enquanto estava fora.
+  const ARQ_NA_VOLTA = path.join(DIR, '.historico-na-volta.json');
+  let historicoNaVolta = {};
+  try { historicoNaVolta = JSON.parse(fs.readFileSync(ARQ_NA_VOLTA, 'utf8')); } catch { /* nenhum */ }
+  const salvarNaVolta = () => { try { fs.writeFileSync(ARQ_NA_VOLTA, JSON.stringify(historicoNaVolta)); } catch { /* tenta na próxima */ } };
+  // Quem já vai receber (ou já recebeu) o histórico desta volta ("grupo|número" → { em, por }), para o
+  // envio automático e o "adicionar com mandar_historico" não mandarem o mesmo PDF duas vezes.
+  const historicoDaVolta = new Map();
+  const marcarHistoricoDaVolta = (jid, ids, por) => {
+    for (const i of ids.filter(Boolean)) historicoDaVolta.set(`${jid}|${digitos(jidNormalizedUser(i))}`, { em: Date.now(), por });
+  };
+  const historicoDaVoltaJa = (jid, ids, depoisDe, por = null) => ids.filter(Boolean).some((i) => {
+    const r = historicoDaVolta.get(`${jid}|${digitos(jidNormalizedUser(i))}`);
+    return r && r.em > depoisDe && (!por || r.por === por);
+  });
+  /** A pessoa voltou ao grupo: manda o histórico do último período fora (ou de todos), se ela tinha saído. */
+  async function mandarHistoricoNaVolta(jid, idsDoAviso) {
+    const config = historicoNaVolta[jid];
+    if (!config) return;
+    const meta = await metadadosGrupo(jid).catch(() => null);
+    const ids = [...new Set((await Promise.all(idsDoAviso.map((i) => idsDaPessoa(i, meta)))).flat())];
+    const telefone = ids.find((i) => i.endsWith('@s.whatsapp.net'));
+    const nome = nomeDaPessoa(...ids) || `+${digitos(jidNormalizedUser(telefone || ids[0]))}`;
+    const lista = periodosFora(jid, ids);
+    const ultimo = lista[lista.length - 1];
+    // Nunca saiu (primeira vez no grupo), ou esta volta não fecha nenhuma saída registrada: nada a mandar.
+    if (!ultimo?.voltou || Date.now() - ultimo.voltou > 10 * 60e3) {
+      log(`Histórico na volta: ${nome} entrou, mas não tenho saída registrada antes desta volta; não mando nada.`);
+      return;
+    }
+    // O próprio bot adicionou com mandar_historico (agora ou agendado): ele já manda, não duplica.
+    if (historicoDaVoltaJa(jid, ids, ultimo.saiu)) {
+      log(`Histórico na volta: ${nome} já recebe o histórico pelo "adicionar"; não duplico.`);
+      return;
+    }
+    marcarHistoricoDaVolta(jid, ids, 'auto');
+    const destino = jidNormalizedUser(telefone || ids[0]);
+    let texto;
+    if (config.completo) {
+      const r = await mandarHistoricoCompleto(jid, destino, ids, meta);
+      log(`Histórico na volta: mandei o histórico completo para ${destino}: ${r.mensagens} mensagem(ns) de ${r.periodos} período(s) fora.`);
+      texto = `${nome} voltou. Histórico mandado no privado: ${r.mensagens} mensagens, ${r.periodos} períodos.`;
+    } else {
+      const n = await mandarHistorico(jid, destino, 0, meta, ultimo.voltou, ultimo.saiu);
+      log(`Histórico na volta: mandei ${n} mensagem(ns) do histórico para ${destino}.`);
+      texto = `${nome} voltou. Histórico mandado no privado: ${n} mensagens.`;
+    }
+    guardarEnviada(await sock.sendMessage(jid, { text: marcaServico('Histórico', texto) }));
   }
 
   /**
@@ -1482,6 +1542,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
    */
   async function executarAdmin(a, { jid, ctx, imagens, outrosMarcados }) {
     if (a.acao === 'apagar_repetidos_do_bot') return apagarRepetidosDoBot(jid); // as do bot: não precisa ser admin
+    // Histórico automático para quem volta: só manda PDF no privado, não precisa ser admin.
+    if (a.acao === 'historico_na_volta_ligar') {
+      historicoNaVolta[jid] = { completo: !!a.historico_completo, desde: Date.now() };
+      salvarNaVolta();
+      return {
+        detalhe: `histórico na volta ligado${a.historico_completo ? ' (completo)' : ''}`,
+        extra: `Ligado: quem sair ou for removido e voltar pro grupo recebe no privado ${a.historico_completo ? 'o histórico de todas as vezes que ficou fora' : 'o que rolou enquanto esteve fora (último período)'}. Quem entra pela primeira vez não recebe nada.`,
+      };
+    }
+    if (a.acao === 'historico_na_volta_desligar') {
+      delete historicoNaVolta[jid];
+      salvarNaVolta();
+      return { detalhe: 'histórico na volta desligado', extra: 'Desligado: quem voltar pro grupo não recebe mais o histórico sozinho.' };
+    }
     const meta = await sock.groupMetadata(jid); // na hora: quem é admin e quem está no grupo agora
     const eu = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => meusIds().includes(jidNormalizedUser(i))));
     if (!eu?.admin) throw new Error('não sou admin do grupo');
@@ -1505,6 +1579,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       if (!alvos.length && a.acao !== 'adicionar') alvos = outrosMarcados.length ? [...outrosMarcados] : ctx?.participant ? [ctx.participant] : [];
       alvos = alvos.filter((j) => !meusIds().includes(jidNormalizedUser(j)));
       if (!alvos.length) throw new Error('não achei quem é a pessoa no grupo');
+      if (a.acao === 'adicionar' && a.mandar_historico) marcarHistoricoDaVolta(jid, alvos, 'adicionar');
       const r = await sock.groupParticipantsUpdate(jid, alvos, { remover: 'remove', adicionar: 'add', promover_admin: 'promote', tirar_admin: 'demote' }[a.acao]);
       groupCache.del(jid);
       let falhas = (r || []).filter((x) => String(x.status) !== '200');
@@ -1537,8 +1612,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
         const jaDentro = falhas.filter((x) => String(x.status) === '409').map((x) => x.alvo);
         for (const j of [...deram, ...jaDentro]) {
           try {
+            const ids = await idsDaPessoa(j, meta);
+            // Voltou pelo link antes da hora e o envio automático já mandou o histórico: não duplica.
+            const ultimo = periodosFora(jid, ids).pop();
+            if (jaDentro.includes(j) && ultimo && historicoDaVoltaJa(jid, ids, ultimo.saiu, 'auto')) {
+              log(`Admin: ${j} já recebeu o histórico quando voltou; não mando de novo.`);
+              continue;
+            }
+            marcarHistoricoDaVolta(jid, ids, 'adicionar');
             if (a.historico_completo) {
-              const r = await mandarHistoricoCompleto(jid, jidNormalizedUser(j), await idsDaPessoa(j, meta), meta, a.texto);
+              const r = await mandarHistoricoCompleto(jid, jidNormalizedUser(j), ids, meta, a.texto);
               log(`Admin: mandei o histórico completo para ${j}: ${r.mensagens} mensagem(ns) de ${r.periodos} período(s) fora.`);
             } else log(`Admin: mandei ${await mandarHistorico(jid, jidNormalizedUser(j), a.historico_desde, meta)} mensagem(ns) do histórico para ${j}.`);
           } catch (e) { log(`Admin: não deu para mandar o histórico para ${j} (${e.message}).`); }
@@ -1658,7 +1741,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       so_admins_editam_dados: 'deixo só admin editar os dados do grupo', todos_editam_dados: 'deixo todo mundo editar os dados do grupo',
       so_admins_adicionam: 'deixo só admin adicionar gente', todos_adicionam: 'deixo todo mundo adicionar gente',
       aprovar_entrada_ligar: 'ligo a aprovação para entrar', aprovar_entrada_desligar: 'desligo a aprovação para entrar',
-      trocar_link: 'troco o link do grupo', apagar_repetidos_do_bot: 'apago os anexos que mandei repetidos', mandar_historico: `mando o histórico${a.historico_completo ? ' de todas as vezes que ficou fora' : ''} no privado de ${nomes}`, mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
+      trocar_link: 'troco o link do grupo', apagar_repetidos_do_bot: 'apago os anexos que mandei repetidos', mandar_historico: `mando o histórico${a.historico_completo ? ' de todas as vezes que ficou fora' : ''} no privado de ${nomes}`,
+      historico_na_volta_ligar: 'passo a mandar o histórico no privado de quem voltar pro grupo', historico_na_volta_desligar: 'paro de mandar o histórico sozinho para quem voltar',
+      mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
     }[a.acao] || `faço "${a.acao}"`;
   }
 

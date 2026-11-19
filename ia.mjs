@@ -312,7 +312,7 @@ export async function falaramComOBot({ grupo, historico, autor, mensagem, botAca
 export const TIPOS_MENSAGEM = ['texto', 'figurinha', 'imagem', 'audio', 'video', 'qualquer'];
 export const TIPOS_ACAO = ['texto', 'ia', 'meme', 'figurinha_padrao', 'audio_gabreu', 'apagar'];
 
-const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'apagar_repetidos_do_bot', 'mensagens_temporarias', 'mandar_historico'];
+const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'apagar_repetidos_do_bot', 'mensagens_temporarias', 'mandar_historico', 'historico_na_volta_ligar', 'historico_na_volta_desligar'];
 const SCHEMA_ADMIN = (descricao) => ({
   type: 'object',
   description: descricao,
@@ -322,7 +322,7 @@ const SCHEMA_ADMIN = (descricao) => ({
     texto: { type: 'string', description: 'mudar_nome/mudar_descricao: o novo texto; mandar_historico (ou adicionar com histórico): recado curto que vai junto no privado da pessoa (zoeira leve se pediram, ex: "Toma, betinha"), ou ""; senão ""' },
     tempo: { type: 'string', enum: ['', 'desligar', '24h', '7d', '90d'], description: 'mensagens_temporarias: duração; senão ""' },
     mandar_historico: { type: 'boolean', description: 'adicionar: true = mandar no privado da pessoa as mensagens do grupo desde que ela saiu (como a função do WhatsApp de compartilhar o histórico); senão false' },
-    historico_completo: { type: 'boolean', description: 'mandar_historico (ou adicionar com mandar_historico): true = TODO o histórico, de TODAS as vezes que a pessoa ficou fora (cada saída/remoção até a volta, num PDF com um cabeçalho por período); false = só o da última saída' },
+    historico_completo: { type: 'boolean', description: 'mandar_historico, historico_na_volta_ligar (ou adicionar com mandar_historico): true = TODO o histórico, de TODAS as vezes que a pessoa ficou fora (cada saída/remoção até a volta, num PDF com um cabeçalho por período); false = só o da última saída' },
   },
   required: ['acao', 'pessoas', 'texto', 'tempo', 'mandar_historico', 'historico_completo'],
   additionalProperties: false,
@@ -541,6 +541,12 @@ manda no privado o que rolou entre a última saída e a volta, SEM remover nem a
 histórico", "de todas as vezes que ele tava fora", "de todas as remoções" = o mesmo com historico_completo
 = true: o bot guarda cada saída e volta e manda um PDF com TODOS os períodos (você CONSEGUE); só "o
 histórico"/"da última remoção" = historico_completo false. Zoeira para ir junto no privado vai em "texto".
+AUTOMÁTICO, daqui para frente ("sempre que alguém voltar pro grupo manda o histórico de quando tava
+fora", "quem voltar recebe o que perdeu") = admin acao "historico_na_volta_ligar" (pessoas []): o bot
+passa a mandar sozinho, no privado de quem saiu/foi removido e voltou (adicionado ou pelo link), o que
+rolou enquanto a pessoa esteve fora, e confirma no grupo quantas mensagens mandou; quem entra pela
+primeira vez não recebe nada. Padrão: historico_completo false (só o último período); true só se pedirem
+"todas as vezes que ficou fora". Para parar = "historico_na_volta_desligar". Você CONSEGUE: não diga que não.
 O bot confirma no grupo quantas mensagens e períodos mandou: não invente esses números. "Quando ele
 voltar manda o histórico" com a volta já agendada = agendada adicionar (mesma pessoa, mesmo horário) com
 mandar_historico true: o bot junta com a que já existe, não cria outra. "Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
