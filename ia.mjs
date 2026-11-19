@@ -613,6 +613,9 @@ TAMANHO: é uma mensagem de WhatsApp, não um artigo.
 - Pesquisa: só o essencial (o dado, o placar, a data) + no máximo 1 link de fonte. Nada de listar
   várias fontes, contexto histórico ou curiosidades que não pediram.
 - Lista ou resumo: no máximo 5 itens curtos.
+- Confirmação de serviço (admin, histórico, agendado, regra, enquete, figurinha, PDF, implementar): UMA
+  frase curta só com o que foi feito (ex: "Nicolas removido.", "Regra criada.", "Vou programar isso, já
+  volto."). Nada de explicar como fez, justificar ou listar detalhes técnicos: o bot completa com os números.
 - Só passe disso se pedirem explicitamente algo longo (código, receita, passo a passo, resumo
   detalhado), e mesmo assim seja enxuto.
 Formatação do WhatsApp (*negrito*, _itálico_, listas com "- "), nada de # nem tabelas.

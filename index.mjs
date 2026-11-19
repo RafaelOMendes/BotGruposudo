@@ -389,6 +389,16 @@ for (const g of mensagensGuardadas.values()) if (g.nome && !g.key.fromMe) { lemb
 // Tira o rótulo "🤖 *Serviço: X*" (um ou vários) do começo do texto.
 const semRotulo = (t) => String(t || '').replace(/^(\s*🤖\s*\*?Servi[çc]o:[^*\n]*\*?\s*)+/u, '');
 
+// Confirmação de serviço no grupo fica curta (pedido do Rafa): no máximo 2 linhas e ~220 caracteres,
+// cortando no fim de uma frase. O que vai no privado e as respostas de conversa não passam por aqui.
+function curto(t, max = 220) {
+  const s = semRotulo(t).split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 2).join('\n');
+  if (s.length <= max) return s;
+  const corte = s.slice(0, max);
+  const fim = Math.max(...['. ', '! ', '? ', '\n'].map((p) => corte.lastIndexOf(p)));
+  return fim > 40 ? corte.slice(0, fim + 1).trim() : `${corte.replace(/\s+\S*$/, '')}…`;
+}
+
 // Cópia de verdade: ao responder uma mensagem, o Baileys APAGA o contextInfo (a quem ela respondia)
 // do objeto original. Sem cópia, o fio se partia em toda mensagem que o bot respondeu.
 function copiaDaMensagem(message) {
@@ -923,7 +933,8 @@ async function iniciar() {
             const r = await executarAdmin(v.admin, { jid, ctx, imagens, outrosMarcados });
             log(`Admin: ${v.admin.acao}${v.admin.pessoas?.length ? ` (${v.admin.pessoas.join(', ')})` : ''} pedido por ${autor}: feito (${r.detalhe}).`);
             servico = 'Admin';
-            resposta = [r.resumoParcial || resposta, r.parcial, r.extra].filter(Boolean).join('\n');
+            // Quando o bot tem o resumo com os números (histórico), ele basta: sem o texto do Claude junto.
+            resposta = [r.resumoParcial || (r.extra ? '' : resposta), r.parcial, r.extra].filter(Boolean).join('\n');
           } catch (e) {
             log(`Admin: ${v.admin.acao} pedido por ${autor} não deu (${e.message}).`);
             resposta = `Não consegui: ${e.message}.`;
@@ -1151,6 +1162,12 @@ async function iniciar() {
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
       }
       if (!resposta && !anexos.length && !figurinhaPronta) return;
+      // Confirmação de serviço: só o essencial do texto do Claude (o que o bot junta, como erros e
+      // horários agendados, fica). Download não: ali o texto costuma ser a própria resposta.
+      const textoClaude = String(v?.texto || '').trim();
+      if (servico && servico !== 'Download' && textoClaude && resposta?.includes(textoClaude)) {
+        resposta = resposta.replace(textoClaude, curto(textoClaude));
+      }
       if (servico) resposta = marcaServico(servico, resposta);
 
       // "@123..." no texto só vira marcação de verdade se a mensagem disser quem está sendo marcado.
@@ -1219,7 +1236,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       }
       if (git('rev-parse', 'HEAD') === antes) {
         log(`Implementar: nada mudou no código (${resumoFeito.slice(0, 200)}).`);
-        await avisar(resumoFeito || 'Não mudei nada no código.');
+        await avisar(curto(resumoFeito) || 'Não mudei nada no código.');
         return;
       }
       // Confere antes de reiniciar: sintaxe de cada .mjs e carregar todos os módulos.
@@ -1233,8 +1250,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       if (v.status !== 0) throw new Error(`o bot não carrega: ${linhas(v.stderr).slice(0, 4).join(' ')}`);
       try { git('push', '-q'); } catch (e) { log(`Implementar: push falhou (${e.message}); fica só local.`); }
       log(`Implementar: pronto (${git('log', '--oneline', '-1')}). Reiniciando para usar.`);
-      await avisar(`${resumoFeito || 'Pronto.'}
-Reiniciando para usar; já volto e faço o pedido.`);
+      await avisar(`${curto(resumoFeito, 160) || 'Pronto.'}\nReiniciando; já volto e faço o pedido.`);
       fs.writeFileSync(ARQ_PENDENTE, JSON.stringify({ jid, id: m.key.id, em: Date.now() }));
       setTimeout(() => process.exit(0), 3000); // start.cmd sobe de novo com o código novo
     } catch (e) {
@@ -1243,7 +1259,7 @@ Reiniciando para usar; já volto e faço o pedido.`);
         git('reset', '--hard', antes); // só desfaz o que foi feito agora (antes estava tudo salvo)
         log(`Implementar: código voltou para ${antes.slice(0, 7)}.`);
       }
-      await avisar(`Não consegui programar isso: ${e.message.slice(0, 300)}`).catch(() => {});
+      await avisar(`Não consegui programar isso: ${e.message.slice(0, 150)}`).catch(() => {});
     } finally {
       implementando = false;
     }
@@ -1578,9 +1594,9 @@ Reiniciando para usar; já volto e faço o pedido.`);
           const destino = jidNormalizedUser(ids.find((i) => i.endsWith('@s.whatsapp.net')) || d);
           const r = await mandarHistoricoCompleto(jid, destino, ids, meta, a.texto);
           log(`Admin: mandei o histórico completo para ${destino}: ${r.mensagens} mensagem(ns) de ${r.periodos} período(s) fora.`);
-          feitos.push(`${nomeDaPessoa(d) || `+${digitos(d)}`} (${r.mensagens} mensagem(ns) de ${r.periodos} período(s) fora${r.vazios ? `; ${r.vazios} sem nada registrado` : ''})`);
+          feitos.push(`${nomeDaPessoa(d) || `+${digitos(d)}`} (${r.mensagens} mensagens, ${r.periodos} períodos)`);
         }
-        return { detalhe: `histórico completo: ${feitos.join(', ')}`, extra: `📜 Histórico completo mandado no privado: ${feitos.join(', ')}.` };
+        return { detalhe: `histórico completo: ${feitos.join(', ')}`, extra: `Histórico mandado no privado: ${feitos.join(', ')}.` };
       }
       for (const d of destinos) {
         const p = participante(digitos(d));
@@ -1592,7 +1608,7 @@ Reiniciando para usar; já volto e faço o pedido.`);
         log(`Admin: mandei ${n} mensagem(ns) do histórico para ${chave}.`);
         feitos.push(`${nomeDaPessoa(d) || `+${digitos(d)}`} (${n} mensagens)`);
       }
-      return { detalhe: `histórico: ${feitos.join(', ')}`, extra: `📜 Histórico mandado no privado: ${feitos.join(', ')}.` };
+      return { detalhe: `histórico: ${feitos.join(', ')}`, extra: `Histórico mandado no privado: ${feitos.join(', ')}.` };
     }
     switch (a.acao) {
       case 'mudar_nome':
