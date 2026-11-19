@@ -30,7 +30,7 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { acharArea, agoraBrasil, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { acharArea, agoraBrasil, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, implementarNoCodigo, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, idsDeLinkClassroom, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
 import { contornar } from './contorno.mjs';
@@ -41,9 +41,13 @@ import { gerarPdf, gerarPdfConversa } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
 import { agendar, pendentes, vencidas, salvarAgenda } from './agenda.mjs';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
+// "node index.mjs --verificar": só carrega os módulos (pega import quebrado) e sai. Usado antes de
+// reiniciar depois de o bot mudar o próprio código.
+if (process.argv.includes('--verificar')) process.exit(0);
 
 // ---------- configuração ----------
 // Valores padrão, sobrescritos por config.json (local, fora do git) e por variáveis de ambiente.
@@ -55,6 +59,8 @@ const CONFIG = {
   // IDs do WhatsApp do Gabriel (ex: "123...@lid" ou "5511999999999@s.whatsapp.net"). Mais confiável que o nome.
   ids: (process.env.BOT_IDS ? process.env.BOT_IDS.split(',') : local.ids || []).map((s) => s.trim()),
   gatilho: /^[?？]+$/,
+  // Dono do bot (Rafa): acesso total; o que o bot não souber fazer, ele programa no próprio código.
+  donos: (local.donos || ['555599806277']).map((s) => String(s).replace(/\D/g, '')),
   audio: path.join(DIR, 'audio', 'gabreu.ogg'),
   // Mensagens mais velhas que isso (ex: entregues ao reconectar) são ignoradas.
   idadeMaxSeg: 10 * 60,
@@ -555,6 +561,7 @@ async function iniciar() {
       log(`Entregas (Moodle/Classroom): ${local.entregas?.ativo && ia ? 'avisos às 12h, 20h e 22h' : 'desligadas'}.`);
       // depois do histórico chegar: liga os nomes (por número) aos participantes (por LID)
       setTimeout(() => ligarNomesDosGrupos().catch((e) => log('Nomes: erro', e.message)), 30_000);
+      setTimeout(() => retomarPedidoDoDono().catch((e) => log('Implementar: erro ao refazer', e.message)), 15_000);
     }
     if (connection === 'close') {
       conectado = false;
@@ -677,10 +684,11 @@ async function iniciar() {
     }
   }
 
-  async function responderMarcacao(m, jid, meta) {
+  async function responderMarcacao(m, jid, meta, { aposImplementar = false } = {}) {
     const autorId = m.key.participant || jid;
     const autor = m.pushName || digitos(autorId);
-    if (Date.now() - (ultimaMencao.get(autorId) || 0) < CONFIG.mencao.intervaloSeg * 1000) {
+    const dono = ehDono(m, meta);
+    if (!aposImplementar && Date.now() - (ultimaMencao.get(autorId) || 0) < CONFIG.mencao.intervaloSeg * 1000) {
       log(`Marcação de ${autor} ignorada (intervalo mínimo).`);
       return;
     }
@@ -802,6 +810,7 @@ async function iniciar() {
         animacao: animado ? (animado.ext === 'webp' ? 'uma figurinha animada' : animado.gif ? 'um GIF' : 'um vídeo') : '',
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
         pessoas: pessoasParaPrompt(jid, meta),
+        dono, aposImplementar,
       });
     };
 
@@ -819,7 +828,13 @@ async function iniciar() {
       try {
         if (erroClaude) throw erroClaude;
         resposta = v.texto;
-        if (v.usouModeloMaior) log(`Pedido de ${autor} era complexo: refeito no ${modelos.complexo.modelo}.`);
+        if (v.usouModeloMaior) log(`Pedido de ${autor} era complexo: refeito no ${v.usouModeloMaior}.`);
+        // Dono pediu algo que o bot não sabe: programa no próprio código (em segundo plano) e depois executa.
+        if (dono && v.implementar?.fazer && v.implementar.pedido?.trim()) {
+          servico = 'Implementando';
+          resposta = resposta || 'Isso eu ainda não sei fazer: vou programar agora e já faço (leva alguns minutos).';
+          implementarPedido({ pedido: v.implementar.pedido.trim(), original: pedido, m, jid, autor }).catch((e) => log('Implementar: erro', e.stack || e));
+        }
         if (v.acao === 'responder' && Array.isArray(v.anexos)) anexos = v.anexos.filter((a) => a?.url).slice(0, 3);
         if (v.acao === 'criar_regra') {
           const remetente = { nome: v.regra_remetente || '', ids: v.regra_remetente ? outrosMarcados : [] };
@@ -1053,6 +1068,83 @@ async function iniciar() {
     decisao
       .then((v) => tarefa(v, null), (e) => tarefa(null, e))
       .catch((e) => log('Erro ao responder marcação:', e.stack || e));
+  }
+
+  // ---------- dono do bot ----------
+  function ehDono(m, meta) {
+    const ids = [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
+    const p = (meta?.participants || []).find((x) => [x.id, x.lid, x.phoneNumber].filter(Boolean).some((j) => ids.includes(jidNormalizedUser(j))));
+    return [...ids, p?.phoneNumber, p?.id, p?.lid].filter(Boolean).some((j) => CONFIG.donos.includes(digitos(jidNormalizedUser(j))));
+  }
+
+  // O dono pediu algo que o bot não sabe: o Claude Code (Opus) programa na pasta do bot; o bot confere
+  // (sintaxe + carregar os módulos), faz o push e reinicia. Ao voltar, processa o mesmo pedido de novo.
+  // Se a conferência falhar, desfaz o commit e continua no código antigo.
+  let implementando = false;
+  const ARQ_PENDENTE = path.join(DIR, '.pendente-dono.json');
+  const git = (...args) => execFileSync('git', args, { cwd: DIR, encoding: 'utf8', windowsHide: true }).trim();
+  async function implementarPedido({ pedido, original, m, jid, autor }) {
+    const avisar = async (texto) => guardarEnviada(await sock.sendMessage(jid, { text: marcaServico('Implementação', texto) }, { quoted: m }));
+    if (implementando) { await avisar('Já estou programando outra coisa; manda de novo quando eu terminar.'); return; }
+    if (git('status', '--porcelain', '--untracked-files=no')) {
+      log('Implementar: há mudanças não salvas no código; não mexo.');
+      await avisar('Tem mudança não salva no código do bot (alguém está mexendo nele); não vou programar por cima agora.');
+      return;
+    }
+    implementando = true;
+    const antes = git('rev-parse', 'HEAD');
+    log(`Implementar (pedido de ${autor}): ${pedido.slice(0, 200)}`);
+    try {
+      const resumoFeito = await implementarNoCodigo({ pedido, original, dir: DIR });
+      // Sobrou mudança sem commit: o bot commita.
+      if (git('status', '--porcelain', '--untracked-files=no')) {
+        git('add', '-u');
+        git('commit', '-m', `Implementado a pedido do dono: ${pedido.slice(0, 60)}
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
+      }
+      if (git('rev-parse', 'HEAD') === antes) {
+        log(`Implementar: nada mudou no código (${resumoFeito.slice(0, 200)}).`);
+        await avisar(resumoFeito || 'Não mudei nada no código.');
+        return;
+      }
+      // Confere antes de reiniciar: sintaxe de cada .mjs e carregar todos os módulos.
+      const linhas = (t) => (t || '').trim().split(/\r?\n/);
+      const arquivos = linhas(git('ls-files', '*.mjs')).filter(Boolean);
+      for (const f of arquivos) {
+        const r = spawnSync(process.execPath, ['--check', f], { cwd: DIR, encoding: 'utf8', windowsHide: true });
+        if (r.status !== 0) throw new Error(`erro de sintaxe em ${f}: ${linhas(r.stderr).slice(0, 4).join(' ')}`);
+      }
+      const v = spawnSync(process.execPath, ['index.mjs', '--verificar'], { cwd: DIR, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+      if (v.status !== 0) throw new Error(`o bot não carrega: ${linhas(v.stderr).slice(0, 4).join(' ')}`);
+      try { git('push', '-q'); } catch (e) { log(`Implementar: push falhou (${e.message}); fica só local.`); }
+      log(`Implementar: pronto (${git('log', '--oneline', '-1')}). Reiniciando para usar.`);
+      await avisar(`${resumoFeito || 'Pronto.'}
+Reiniciando para usar; já volto e faço o pedido.`);
+      fs.writeFileSync(ARQ_PENDENTE, JSON.stringify({ jid, id: m.key.id, em: Date.now() }));
+      setTimeout(() => process.exit(0), 3000); // start.cmd sobe de novo com o código novo
+    } catch (e) {
+      log(`Implementar: falhou (${e.message}).`);
+      if (git('rev-parse', 'HEAD') !== antes || git('status', '--porcelain', '--untracked-files=no')) {
+        git('reset', '--hard', antes); // só desfaz o que foi feito agora (antes estava tudo salvo)
+        log(`Implementar: código voltou para ${antes.slice(0, 7)}.`);
+      }
+      await avisar(`Não consegui programar isso: ${e.message.slice(0, 300)}`).catch(() => {});
+    } finally {
+      implementando = false;
+    }
+  }
+
+  // Ao ligar: se reiniciou por causa de uma implementação, refaz o pedido do dono (agora com a função nova).
+  async function retomarPedidoDoDono() {
+    let p;
+    try { p = JSON.parse(fs.readFileSync(ARQ_PENDENTE, 'utf8')); } catch { return; }
+    fs.rmSync(ARQ_PENDENTE, { force: true });
+    if (Date.now() - p.em > 60 * 60e3) return;
+    const m = mensagensGuardadas.get(p.id);
+    if (!m) { log('Implementar: não achei a mensagem do pedido para refazer.'); return; }
+    log('Implementar: refazendo o pedido do dono com o código novo.');
+    await responderMarcacao(m, p.jid, await metadadosGrupo(p.jid), { aposImplementar: true });
   }
 
   // ---------- marcar pessoas ----------
