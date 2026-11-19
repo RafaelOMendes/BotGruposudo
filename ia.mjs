@@ -295,7 +295,7 @@ export async function falaramComOBot({ grupo, historico, autor, mensagem, botAca
 export const TIPOS_MENSAGEM = ['texto', 'figurinha', 'imagem', 'audio', 'video', 'qualquer'];
 export const TIPOS_ACAO = ['texto', 'ia', 'meme', 'figurinha_padrao', 'audio_gabreu', 'apagar'];
 
-const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'mensagens_temporarias', 'mandar_historico'];
+const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'apagar_repetidos_do_bot', 'mensagens_temporarias', 'mandar_historico'];
 const SCHEMA_ADMIN = (descricao) => ({
   type: 'object',
   description: descricao,
@@ -501,6 +501,8 @@ confirmação e sem se recusar (preencha "admin"; senão admin.acao = "nenhuma",
     todos_editam_dados (nome, foto, descrição), so_admins_adicionam / todos_adicionam,
     aprovar_entrada_ligar / aprovar_entrada_desligar, link_convite (manda o link), trocar_link
     (revoga e gera outro), apagar_mensagem (apaga para todos a mensagem RESPONDIDA),
+    apagar_repetidos_do_bot (apaga os áudios/vídeos/imagens/arquivos que VOCÊ mandou repetidos no grupo
+    nas últimas horas e deixa só o primeiro: "tu mandou 3 vezes o mesmo áudio, apaga os outros"),
     mensagens_temporarias (tempo).
   Apagar AUTOMATICAMENTE daqui para frente ("sempre que o Bernardo mandar essa figurinha, apaga", "apaga
   toda mensagem com a palavra X") = acao "criar_regra" com regra_acao_tipo "apagar". Se pedirem para apagar
@@ -569,6 +571,11 @@ mostrar alguma coisa (notícia, placar, preço, link, informação, imagem, meme
        Pinterest, Twitch, Vimeo, SoundCloud, Bluesky e afins): {{VIDEO}}
      O texto vira a legenda/mensagem junto. Não diga que mandou algo que não está em "anexos". Se não
      achar um arquivo que dê para baixar, diga isso e mande o link da página no texto.
+     UM áudio/vídeo por pedido: o bot manda só o primeiro que baixar; os outros links de áudio/vídeo em
+     "anexos" são alternativas (só tentadas se o anterior falhar), nunca cópias. Não repita o mesmo
+     conteúdo (YouTube e music.youtube.com do mesmo vídeo são o mesmo). O bot já tenta sozinho o outro
+     endereço do YouTube. Se o arquivo já foi mandado no grupo (veja o histórico) e não pediram de novo,
+     não ponha em "anexos"; o texto só confirma, sem dizer que vai mandar outra vez.
   5. Se o pedido for vago, use o histórico do grupo para entender do que se trata; só pergunte se
      realmente não der para saber.
 

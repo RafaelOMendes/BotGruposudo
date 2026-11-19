@@ -10,6 +10,7 @@
 // Usa Baileys (protocolo do WhatsApp direto, sem navegador). Os pedidos de reenvio que o
 // iPhone faz quando não consegue descriptografar ("Aguardando mensagem") são atendidos via getMessage.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -228,6 +229,61 @@ function guardarEnviada(msg) {
   return msg;
 }
 
+// ---------- anexos repetidos ----------
+// O mesmo arquivo não vai duas vezes: nem na mesma resposta (o Claude às vezes põe o link do YouTube e o do
+// music.youtube.com, que são o mesmo vídeo), nem em duas respostas ao mesmo tempo (duas marcações pedindo a
+// mesma coisa), nem quando o bot refaz um pedido depois de reiniciar.
+/** Chave do link: YouTube (www, m, music, youtu.be, shorts) vira o ID do vídeo; o resto, a URL sem "www.". */
+function chaveDoLink(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase().replace(/^(www|m|music)\./, '');
+    if (host === 'youtu.be') return `yt:${u.pathname.split('/')[1]}`;
+    if (host === 'youtube.com') {
+      const id = u.searchParams.get('v') || u.pathname.match(/^\/(?:shorts|live|embed)\/([\w-]+)/)?.[1];
+      if (id) return `yt:${id}`;
+    }
+    return `${host}${u.pathname.replace(/\/$/, '')}${u.search}`;
+  } catch {
+    return url;
+  }
+}
+/** Onde tentar baixar, em ordem: o link e, se for YouTube, o mesmo vídeo pelo outro endereço (www ↔ music). */
+function alternativasDoLink(url) {
+  const chave = chaveDoLink(url);
+  if (!chave.startsWith('yt:')) return [url];
+  const id = chave.slice(3);
+  const outro = /music\.youtube\.com/i.test(url) ? `https://www.youtube.com/watch?v=${id}` : `https://music.youtube.com/watch?v=${id}`;
+  return [url, outro];
+}
+const TIPOS_DE_MIDIA = ['audioMessage', 'videoMessage', 'imageMessage', 'documentMessage'];
+/** fileSha256 (base64) da mídia de uma mensagem guardada, ou null. Áudio de voz (o do Gabreu) não conta. */
+function shaDaMensagem(c) {
+  const tipo = TIPOS_DE_MIDIA.find((t) => c?.[t]);
+  const h = tipo && !c[tipo].ptt ? c[tipo].fileSha256 : null;
+  if (!h) return null;
+  return typeof h === 'string' ? h : Buffer.from(h instanceof Uint8Array ? h : Object.values(h)).toString('base64');
+}
+/** SHA-256 (base64) do arquivo que vai ser enviado: é o mesmo fileSha256 que o WhatsApp guarda. */
+function shaDoAnexo(anexo) {
+  const b = anexo?.audio || anexo?.video || anexo?.image || anexo?.document;
+  return Buffer.isBuffer(b) ? crypto.createHash('sha256').update(b).digest('base64') : null;
+}
+/** O bot já mandou esse link ou esse arquivo no grupo nos últimos `janelaSeg` segundos? */
+function anexoRecente(jid, { chave, sha }, janelaSeg) {
+  const desde = Math.floor(Date.now() / 1000) - janelaSeg;
+  for (const g of mensagensGuardadas.values()) {
+    if (!g.key.fromMe || g.key.remoteJid !== jid || (g.em || 0) < desde) continue;
+    if ((chave && g.chave === chave) || (sha && shaDaMensagem(conteudo(g)) === sha)) return true;
+  }
+  return false;
+}
+// Link sendo baixado/enviado agora (grupo|chave -> quando começou): outra resposta com o mesmo link espera.
+const baixandoAgora = new Map();
+async function esperarDownloadIgual(k) {
+  for (let i = 0; i < 120 && Date.now() - (baixandoAgora.get(k) || 0) < 10 * 60e3; i++) await new Promise((r) => setTimeout(r, 2000));
+}
+
 // Mensagens recentes do grupo (só a mensagem em si: texto, quem mandou, a quem respondeu e a
 // referência da mídia; nada baixado). Servem para "puxar o fio" das respostas: a mensagem respondida,
 // a que ela respondia, e assim por diante, para o bot não perder o contexto.
@@ -261,6 +317,7 @@ function guardarMensagem(msg, nome) {
     key,
     message: copiaDaMensagem(msg.message),
     nome: nome || antes?.nome || '',
+    ...(antes?.chave ? { chave: antes.chave } : {}), // link de onde veio o anexo que o bot mandou
     em: numero(msg.messageTimestamp) || antes?.em || Math.floor(Date.now() / 1000),
   });
   // Cabe o histórico inteiro de um grupo; se passar, descarta as mais ANTIGAS (por horário).
@@ -816,6 +873,8 @@ async function iniciar() {
 
     // 2) O resto (gerar imagem, baixar, enviar) roda fora da fila: enquanto uma imagem gera,
     //    o bot continua respondendo as outras marcações.
+    const reservas = []; // links que esta resposta está baixando (ver baixandoAgora)
+    const chavesDosAnexos = new Map(); // anexo pronto -> chave do link de onde veio
     const tarefa = async (v, erroClaude) => {
       let resposta;
       let anexos = [];
@@ -1015,22 +1074,68 @@ async function iniciar() {
         }
 
         // Baixa o que o Claude pediu para mandar (com as travas de segurança do web.mjs).
+        // Áudio/vídeo: UM só por pedido; os outros links são alternativas, tentadas só se o anterior falhou
+        // (ex: YouTube deu 403 → tenta pelo music.youtube.com). E nada repetido: nem o mesmo link, nem o mesmo
+        // arquivo, nem o que o bot acabou de mandar no grupo (outra resposta, ou antes de reiniciar).
         const prontos = [];
         const falhas = [];
+        const jaMandados = [];
+        const chavesVistas = new Set();
+        const shasVistos = new Set();
+        let midiaOk = false;
+        const janela = aposImplementar ? 2 * 3600 : 15 * 60;
         for (const a of anexos) {
           if (a.pronto) { prontos.push(a.pronto); continue; }
           if (a.gerada) { prontos.push({ image: a.gerada, caption: '' }); continue; }
-          try {
-            prontos.push(await prepararAnexo(a, ''));
-            log(`Baixei ${a.tipo}: ${a.url}`);
-          } catch (e) {
-            log(`Não deu para baixar ${a.tipo} (${e.message}): ${a.url}`);
-            falhas.push(`${a.url} (${e.message})`);
+          const somOuVideo = a.tipo === 'audio' || a.tipo === 'video';
+          if (somOuVideo && midiaOk) { log(`Anexo extra ignorado (já tem ${a.tipo} neste pedido): ${a.url}`); continue; }
+          const chave = chaveDoLink(a.url);
+          if (chavesVistas.has(chave)) { log(`Anexo repetido ignorado: ${a.url}`); continue; }
+          chavesVistas.add(chave);
+          const k = `${jid}|${chave}`;
+          if (baixandoAgora.has(k)) await esperarDownloadIgual(k);
+          if (anexoRecente(jid, { chave }, janela)) {
+            log(`Não mando de novo (o bot já mandou esse ${a.tipo}): ${a.url}`);
+            jaMandados.push(a.tipo);
+            if (somOuVideo) midiaOk = true;
+            continue;
           }
+          baixandoAgora.set(k, Date.now());
+          reservas.push(k);
+          let pronto = null;
+          let erro = null;
+          for (const url of alternativasDoLink(a.url)) {
+            try {
+              pronto = await prepararAnexo({ ...a, url }, '');
+              log(`Baixei ${a.tipo}: ${url}`);
+              break;
+            } catch (e) {
+              erro = e;
+              log(`Não deu para baixar ${a.tipo} (${e.message}): ${url}`);
+            }
+          }
+          if (!pronto) { falhas.push({ somOuVideo, texto: `${a.url} (${erro.message})` }); continue; }
+          const sha = shaDoAnexo(pronto);
+          if (sha && (shasVistos.has(sha) || anexoRecente(jid, { sha }, janela))) {
+            log(`Não mando de novo (mesmo arquivo já ${shasVistos.has(sha) ? 'nesta resposta' : 'mandado'}): ${a.url}`);
+            if (!shasVistos.has(sha)) jaMandados.push(a.tipo);
+            if (somOuVideo) midiaOk = true;
+            continue;
+          }
+          if (sha) shasVistos.add(sha);
+          prontos.push(pronto);
+          chavesDosAnexos.set(pronto, chave);
+          if (somOuVideo) midiaOk = true;
         }
         anexos = prontos;
         if (anexos.length && !servico) servico = 'Download';
-        if (falhas.length) resposta = `${resposta || ''}\n\nNão consegui baixar:\n${falhas.map((f) => '- ' + f).join('\n')}`.trim();
+        // Se um áudio/vídeo deu certo, as tentativas que falharam antes não interessam a ninguém.
+        const erros = falhas.filter((f) => !(f.somOuVideo && midiaOk)).map((f) => f.texto);
+        if (erros.length) resposta = `${resposta || ''}\n\nNão consegui baixar:\n${erros.map((f) => '- ' + f).join('\n')}`.trim();
+        if (jaMandados.length && !anexos.some((x) => x.audio || x.video)) {
+          const oQue = jaMandados.includes('audio') ? 'Esse áudio' : jaMandados.includes('video') ? 'Esse vídeo' : 'Esse arquivo';
+          resposta = `${resposta || ''}\n\n(${oQue} já foi mandado aí em cima; não mando de novo.)`.trim();
+        }
       } catch (e) {
         log('Erro ao perguntar ao claude:', e.message);
         resposta = 'Travei aqui, tenta de novo daqui a pouco.';
@@ -1056,7 +1161,10 @@ async function iniciar() {
         ultimaId = guardarEnviada(await sock.sendMessage(jid, { text: resposta, mentions }, { quoted: m }))?.key?.id || ultimaId;
       }
       for (const [i, anexo] of anexos.entries()) {
-        ultimaId = guardarEnviada(await sock.sendMessage(jid, anexo, i === 0 ? { quoted: m } : {}))?.key?.id || ultimaId;
+        const id = guardarEnviada(await sock.sendMessage(jid, anexo, i === 0 ? { quoted: m } : {}))?.key?.id;
+        const g = id && mensagensGuardadas.get(id);
+        if (g && chavesDosAnexos.has(anexo)) g.chave = chavesDosAnexos.get(anexo); // para não mandar de novo
+        ultimaId = id || ultimaId;
       }
       if (figurinhaPronta) ultimaId = guardarEnviada(await sock.sendMessage(jid, { sticker: figurinhaPronta }, { quoted: m }))?.key?.id || ultimaId;
       registrar(jid, 'Bot', resposta || '[anexo]');
@@ -1067,7 +1175,8 @@ async function iniciar() {
     filaClaude = decisao.catch(() => {}); // libera a fila assim que o Claude responde
     decisao
       .then((v) => tarefa(v, null), (e) => tarefa(null, e))
-      .catch((e) => log('Erro ao responder marcação:', e.stack || e));
+      .catch((e) => log('Erro ao responder marcação:', e.stack || e))
+      .finally(() => { for (const k of reservas) baixandoAgora.delete(k); }); // link enviado (ou desistiu)
   }
 
   // ---------- dono do bot ----------
@@ -1243,11 +1352,39 @@ Reiniciando para usar; já volto e faço o pedido.`);
   }
 
   const DURACAO = { desligar: 0, '24h': 86400, '7d': 7 * 86400, '90d': 90 * 86400 };
+
+  /**
+   * Apaga para todos os anexos que o BOT mandou repetidos no grupo nas últimas 6 h (mesmo arquivo, ou mesmo
+   * link, até 15 min depois da primeira cópia): fica só a primeira. Áudio de voz (o do Gabreu) e figurinha
+   * não contam, porque as regras mandam esses de novo de propósito.
+   */
+  async function apagarRepetidosDoBot(jid) {
+    const desde = Math.floor(Date.now() / 1000) - 6 * 3600;
+    const minhas = [...mensagensGuardadas.values()]
+      .filter((g) => g.key.fromMe && g.key.remoteJid === jid && (g.em || 0) >= desde && shaDaMensagem(conteudo(g)))
+      .sort((x, y) => (x.em || 0) - (y.em || 0));
+    const primeiras = []; // { sha, chave, em }
+    const repetidas = [];
+    for (const g of minhas) {
+      const sha = shaDaMensagem(conteudo(g));
+      const igual = primeiras.find((p) => (p.sha === sha || (g.chave && p.chave === g.chave)) && (g.em || 0) - p.em <= 15 * 60);
+      if (igual) repetidas.push(g);
+      else primeiras.push({ sha, chave: g.chave, em: g.em || 0 });
+    }
+    if (!repetidas.length) throw new Error('não achei anexo repetido meu nas últimas horas');
+    for (const g of repetidas) {
+      await sock.sendMessage(jid, { delete: { remoteJid: jid, id: g.key.id, fromMe: true } });
+      mensagensGuardadas.delete(g.key.id);
+    }
+    log(`Apaguei ${repetidas.length} anexo(s) repetido(s) do bot: ${repetidas.map((g) => g.key.id).join(', ')}.`);
+    return { detalhe: `${repetidas.length} repetido(s) apagado(s)` };
+  }
   /**
    * Executa a função de admin que o Claude pediu. Devolve { ok, detalhe }; lança erro com a explicação
    * se não deu (o bot não é admin, pessoa não achada...).
    */
   async function executarAdmin(a, { jid, ctx, imagens, outrosMarcados }) {
+    if (a.acao === 'apagar_repetidos_do_bot') return apagarRepetidosDoBot(jid); // as do bot: não precisa ser admin
     const meta = await sock.groupMetadata(jid); // na hora: quem é admin e quem está no grupo agora
     const eu = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => meusIds().includes(jidNormalizedUser(i))));
     if (!eu?.admin) throw new Error('não sou admin do grupo');
@@ -1409,7 +1546,7 @@ Reiniciando para usar; já volto e faço o pedido.`);
       so_admins_editam_dados: 'deixo só admin editar os dados do grupo', todos_editam_dados: 'deixo todo mundo editar os dados do grupo',
       so_admins_adicionam: 'deixo só admin adicionar gente', todos_adicionam: 'deixo todo mundo adicionar gente',
       aprovar_entrada_ligar: 'ligo a aprovação para entrar', aprovar_entrada_desligar: 'desligo a aprovação para entrar',
-      trocar_link: 'troco o link do grupo', mandar_historico: `mando o histórico no privado de ${nomes}`, mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
+      trocar_link: 'troco o link do grupo', apagar_repetidos_do_bot: 'apago os anexos que mandei repetidos', mandar_historico: `mando o histórico no privado de ${nomes}`, mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
     }[a.acao] || `faço "${a.acao}"`;
   }
 
