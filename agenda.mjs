@@ -36,3 +36,6 @@ export function cancelar(id) {
   salvar();
   return agendadas.length < antes;
 }
+
+/** Grava depois de mudar uma agendada que veio de pendentes() (ex: juntar o histórico). */
+export const salvarAgenda = () => salvar();

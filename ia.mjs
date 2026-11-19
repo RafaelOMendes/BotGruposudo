@@ -291,7 +291,7 @@ export async function falaramComOBot({ grupo, historico, autor, mensagem, botAca
 export const TIPOS_MENSAGEM = ['texto', 'figurinha', 'imagem', 'audio', 'video', 'qualquer'];
 export const TIPOS_ACAO = ['texto', 'ia', 'meme', 'figurinha_padrao', 'audio_gabreu', 'apagar'];
 
-const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'mensagens_temporarias'];
+const ACOES_ADMIN = ['nenhuma', 'remover', 'adicionar', 'promover_admin', 'tirar_admin', 'mudar_nome', 'mudar_descricao', 'mudar_foto', 'so_admins_mandam', 'todos_mandam', 'so_admins_editam_dados', 'todos_editam_dados', 'so_admins_adicionam', 'todos_adicionam', 'aprovar_entrada_ligar', 'aprovar_entrada_desligar', 'link_convite', 'trocar_link', 'apagar_mensagem', 'mensagens_temporarias', 'mandar_historico'];
 const SCHEMA_ADMIN = (descricao) => ({
   type: 'object',
   description: descricao,
@@ -498,7 +498,11 @@ for para DEPOIS vai em "agendadas" (minutos a partir de agora; para um horário,
 atual), e o que for para agora vai em "admin" como sempre. Ex: "remove e adiciona o Nicolas em 10 min"
 = admin remover AGORA + agendada adicionar em 10 min. "Remove o Nicolas daqui a 5 min" = só a agendada.
 "Adiciona e manda o histórico" = admin adicionar com mandar_historico = true (o bot manda no privado
-da pessoa as mensagens desde que ela saiu: você CONSEGUE). "Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
+da pessoa as mensagens desde que ela saiu: você CONSEGUE). Pessoa que JÁ está no grupo ("manda o histórico
+da última remoção dele", "envia o histórico pro Nicolas") = admin acao "mandar_historico" com pessoas: o bot
+manda no privado o que rolou entre a última saída e a volta, SEM remover nem adicionar ninguém. "Quando ele
+voltar manda o histórico" com a volta já agendada = agendada adicionar (mesma pessoa, mesmo horário) com
+mandar_historico true: o bot junta com a que já existe, não cria outra. "Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
 sozinho na hora: nunca diga que não consegue agendar. O "texto" da resposta confirma curto (ex:
 "Nicolas removido; volta em 10 min."). Sem tempo no pedido: agendadas = [].
 

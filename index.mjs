@@ -40,7 +40,7 @@ import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImag
 import { gerarPdf, gerarPdfConversa } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
-import { agendar, pendentes, vencidas } from './agenda.mjs';
+import { agendar, pendentes, vencidas, salvarAgenda } from './agenda.mjs';
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -516,7 +516,13 @@ async function iniciar() {
   });
 
   sock.ev.on('groups.update', (updates) => updates.forEach((u) => groupCache.del(u.id)));
-  sock.ev.on('group-participants.update', (u) => groupCache.del(u.id));
+  sock.ev.on('group-participants.update', (u) => {
+    groupCache.del(u.id);
+    // Hora em que a pessoa voltou (adicionada ou pelo link): o "histórico da última remoção" vai até aqui.
+    if (u.action === 'add') {
+      for (const p of u.participants || []) marcarVolta(u.id, typeof p === 'string' ? [p] : [p.id, p.phoneNumber, p.lid]);
+    }
+  });
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     // Sem sessão e com "numeroBot" no config: também dá para conectar digitando um código no celular
@@ -854,9 +860,26 @@ async function iniciar() {
             const minutos = Math.min(7 * 24 * 60, Math.max(0.25, Number(a.minutos) || 0));
             const admin = a.admin?.acao && a.admin.acao !== 'nenhuma' ? a.admin : null;
             if (!admin && !a.mensagem?.trim()) continue;
-            // Mesma ação para a mesma pessoa já agendada perto dessa hora (ex: duas pessoas pediram): não repete.
-            if (admin && pendentes(jid).some((p) => p.admin?.acao === admin.acao && Math.abs(p.quando - (Date.now() + minutos * 60e3)) < 5 * 60e3
-              && (p.admin.pessoas || []).join() === (admin.pessoas || []).join())) { feitas.push(`${descreverAcao(admin, meta2)} (já estava agendado)`); continue; }
+            // Mesma ação para a mesma pessoa já agendada perto dessa hora (ex: duas pessoas pediram, ou
+            // "quando ele voltar manda o histórico"): não repete; se o novo pede o histórico, junta no que já tem.
+            // A pessoa pode vir pelo LID num pedido e pelo número no outro: compara pelo telefone.
+            const fones = async (lista) => (await Promise.all((lista || []).map((n) => telefoneDe(n, meta2)))).sort().join();
+            let igual = null;
+            if (admin) {
+              const meus = await fones(admin.pessoas);
+              for (const p of pendentes(jid)) {
+                if (p.admin?.acao === admin.acao && Math.abs(p.quando - (Date.now() + minutos * 60e3)) < 10 * 60e3
+                  && await fones(p.admin.pessoas) === meus) { igual = p; break; }
+              }
+            }
+            if (igual) {
+              if (admin.mandar_historico && !igual.admin.mandar_historico) {
+                igual.admin.mandar_historico = true;
+                salvarAgenda();
+                feitas.push(`${igual.descricao} (já estava agendado; agora manda o histórico junto)`);
+              } else feitas.push(`${descreverAcao(admin, meta2)} (já estava agendado)`);
+              continue;
+            }
             const quando = Date.now() + minutos * 60e3;
             const descricao = admin ? descreverAcao(admin, meta2) : 'aviso';
             // historico_desde: se for "adicionar e mandar o histórico", conta a partir do pedido.
@@ -1065,14 +1088,29 @@ async function iniciar() {
   const ARQ_SAIDAS = path.join(DIR, '.saidas.json');
   let saidas = {};
   try { saidas = JSON.parse(fs.readFileSync(ARQ_SAIDAS, 'utf8')); } catch { /* nenhuma */ }
-  function marcarSaida(jid, ids) {
-    for (const i of ids.filter(Boolean)) saidas[`${jid}|${digitos(jidNormalizedUser(i))}`] = Date.now();
+  function marcarSaida(jid, ids, sufixo = '') {
+    for (const i of ids.filter(Boolean)) saidas[`${jid}|${digitos(jidNormalizedUser(i))}${sufixo}`] = Date.now();
     try { fs.writeFileSync(ARQ_SAIDAS, JSON.stringify(saidas)); } catch { /* tenta na próxima */ }
   }
   /** Manda no privado as mensagens do grupo desde que a pessoa saiu (ou desde `desde`). */
+  // Número de telefone de alguém (vindo como LID ou número), para comparar a mesma pessoa.
+  async function telefoneDe(n, meta) {
+    const d = digitos(n);
+    const p = (meta?.participants || []).find((x) => [x.id, x.lid, x.phoneNumber].filter(Boolean).some((j) => digitos(jidNormalizedUser(j)) === d));
+    if (p?.phoneNumber) return digitos(jidNormalizedUser(p.phoneNumber));
+    const pn = await sock.signalRepository?.lidMapping?.getPNForLID?.(`${d}@lid`).catch(() => null);
+    return pn ? digitos(jidNormalizedUser(pn)) : d;
+  }
+
+  const marcarVolta = (jid, ids) => marcarSaida(jid, ids, '|volta');
+
   async function mandarHistorico(jid, destino, desde, meta, ate = 0) {
     // As mensagens guardadas têm a hora em SEGUNDOS (messageTimestamp); saídas e pedidos, em ms.
-    const inicio = Math.floor((saidas[`${jid}|${digitos(destino)}`] || desde || 0) / 1000);
+    const saiu = saidas[`${jid}|${digitos(destino)}`];
+    const voltou = saidas[`${jid}|${digitos(destino)}|volta`];
+    // Já voltou depois da última saída (pediram o histórico depois): vai só até a volta.
+    if (!ate && saiu && voltou > saiu) ate = voltou;
+    const inicio = Math.floor((saiu || desde || 0) / 1000);
     const fim = ate ? Math.floor(ate / 1000) : Infinity;
     const eDestino = (...ids) => ids.filter(Boolean).some((i) => digitos(jidNormalizedUser(i)) === digitos(destino));
     const nomeDe = (key, nome) => (key?.fromMe ? 'Bot' : nome || nomeDaPessoa(key?.participant, key?.participantAlt) || 'alguém');
@@ -1167,8 +1205,11 @@ async function iniciar() {
           marcarSaida(jid, [j, p?.lid, p?.phoneNumber, p?.id]);
         }
       }
+      if (a.acao === 'adicionar') for (const j of deram) marcarVolta(jid, [j]);
       if (a.acao === 'adicionar' && a.mandar_historico) {
-        for (const j of deram) {
+        // Quem "já está no grupo" (voltou pelo link antes da hora) também recebe o histórico pedido.
+        const jaDentro = falhas.filter((x) => String(x.status) === '409').map((x) => x.alvo);
+        for (const j of [...deram, ...jaDentro]) {
           try { log(`Admin: mandei ${await mandarHistorico(jid, jidNormalizedUser(j), a.historico_desde, meta)} mensagem(ns) do histórico para ${j}.`); }
           catch (e) { log(`Admin: não deu para mandar o histórico para ${j} (${e.message}).`); }
         }
@@ -1207,6 +1248,26 @@ async function iniciar() {
         ? `${verbo}: ${deram.map(nomeDoAlvo).join(', ')}.\nNão deu: ${falhas.map((x) => `${nomeDoAlvo(x.alvo)} (${motivo(x.status)})`).join(', ')}.`
         : '';
       return { detalhe: `${a.acao} ${alvos.length - falhas.length}/${alvos.length}`, resumoParcial };
+    }
+    if (a.acao === 'mandar_historico') {
+      // Só manda o histórico no privado (a pessoa já está no grupo): da última saída até a volta.
+      const numeros = [...new Set((a.pessoas || []).map(digitos).filter((n) => n.length >= 8))];
+      let destinos = numeros.map((n) => { const p = participante(n); return p ? p.phoneNumber || p.id : `${n}@lid`; });
+      if (!destinos.length) destinos = outrosMarcados.length ? [...outrosMarcados] : ctx?.participant ? [ctx.participant] : [];
+      destinos = destinos.map(jidNormalizedUser).filter((j) => !meusIds().includes(j));
+      if (!destinos.length) throw new Error('não achei para quem mandar o histórico');
+      const feitos = [];
+      for (const d of destinos) {
+        const p = participante(digitos(d));
+        const ids = [d, p?.id, p?.lid, p?.phoneNumber].filter(Boolean).map(jidNormalizedUser);
+        // A saída pode ter sido marcada pelo LID ou pelo número: usa a que existir.
+        const chave = ids.find((i) => saidas[`${jid}|${digitos(i)}`]) || d;
+        if (!saidas[`${jid}|${digitos(chave)}`]) throw new Error(`não tenho registro de quando ${nomeDaPessoa(d) || 'a pessoa'} saiu`);
+        const n = await mandarHistorico(jid, chave, 0, meta);
+        log(`Admin: mandei ${n} mensagem(ns) do histórico para ${chave}.`);
+        feitos.push(`${nomeDaPessoa(d) || `+${digitos(d)}`} (${n} mensagens)`);
+      }
+      return { detalhe: `histórico: ${feitos.join(', ')}`, extra: `📜 Histórico mandado no privado: ${feitos.join(', ')}.` };
     }
     switch (a.acao) {
       case 'mudar_nome':
@@ -1256,7 +1317,7 @@ async function iniciar() {
       so_admins_editam_dados: 'deixo só admin editar os dados do grupo', todos_editam_dados: 'deixo todo mundo editar os dados do grupo',
       so_admins_adicionam: 'deixo só admin adicionar gente', todos_adicionam: 'deixo todo mundo adicionar gente',
       aprovar_entrada_ligar: 'ligo a aprovação para entrar', aprovar_entrada_desligar: 'desligo a aprovação para entrar',
-      trocar_link: 'troco o link do grupo', mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
+      trocar_link: 'troco o link do grupo', mandar_historico: `mando o histórico no privado de ${nomes}`, mensagens_temporarias: `ponho mensagens temporárias (${a.tempo})`,
     }[a.acao] || `faço "${a.acao}"`;
   }
 
