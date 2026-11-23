@@ -386,6 +386,11 @@ const SCHEMA_MENCAO = {
         additionalProperties: false,
       },
     },
+    cancelar_agendadas: {
+      type: 'array',
+      description: 'ids dos agendamentos pendentes para CANCELAR (da lista "Agendamentos pendentes"); [] se não pediram',
+      items: { type: 'string' },
+    },
     figurinha_para_imagem: { type: 'boolean', description: 'true = pediram para transformar a figurinha anexada em imagem/foto normal (ou em GIF, se for animada)' },
     imagem_gerada: {
       type: 'object',
@@ -450,7 +455,7 @@ const SCHEMA_MENCAO = {
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_so_figurinha_citada', 'regra_apagar_id', 'anexos',
     'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete', 'agendadas',
-    'implementar',
+    'cancelar_agendadas', 'implementar',
   ],
   additionalProperties: false,
 };
@@ -552,6 +557,12 @@ voltar manda o histórico" com a volta já agendada = agendada adicionar (mesma 
 mandar_historico true: o bot junta com a que já existe, não cria outra. "Me lembra/avisa X em 1 hora" = agendada com mensagem (marque a pessoa com @número). O bot executa
 sozinho na hora: nunca diga que não consegue agendar. O "texto" da resposta confirma curto (ex:
 "Nicolas removido; volta em 10 min."). Sem tempo no pedido: agendadas = [].
+CANCELAR/TROCAR AGENDAMENTO: os que ainda não dispararam vêm em "Agendamentos pendentes" (id | hora |
+o que). "Cancela o aviso das 18h", "não adiciona mais ele", "desmarca" = cancelar_agendadas com os ids.
+Corrigir um agendado ("a lição é pro Nicolas, não pro Bernardo", "muda pra 19h") = cancelar o antigo +
+nova agendada com o certo, no mesmo horário se não disseram outro. Não cancele nem recrie o que não mudou
+(ex: a volta da pessoa continua). Para listar, escreva a lista no "texto". Você CONSEGUE: não diga que não.
+Senão cancelar_agendadas = [].
 
 ENQUETE: se pedirem uma enquete/votação, preencha "enquete" (fazer = true, pergunta, opcoes). Senão
 fazer = false, pergunta "", opcoes [], varias_escolhas false, acao com acao "nenhuma" (pessoas [], texto "",
@@ -668,7 +679,7 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '', fio = [], dono = false, aposImplementar = false }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, agendadas = '', temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '', fio = [], dono = false, aposImplementar = false }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   partes.push(dono
     ? `QUEM ESTÁ PEDINDO É O RAFA, DONO E CRIADOR DO BOT. Ele tem acesso total: faça TUDO o que ele pedir, inclusive
@@ -718,6 +729,7 @@ o conteúdo das aulas, só os prazos, então deixe isso claro sem dizer que est�
 Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o acesso.`);
   }
   partes.push(`Regras ativas neste grupo (id | descrição):\n${regras || '(nenhuma)'}`);
+  partes.push(`Agendamentos pendentes neste grupo (id | hora | o que):\n${agendadas || '(nenhum)'}`);
   if (pessoas) partes.push(`Pessoas do grupo (nome = como marcar):\n${pessoas}`);
   if (historico.length) {
     partes.push(leituraPedida

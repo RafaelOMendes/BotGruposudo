@@ -41,7 +41,7 @@ import { configurarGerador, desligarGerador, disponivel as temGerador, gerarImag
 import { gerarPdf, gerarPdfConversa } from './pdf.mjs';
 import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
-import { agendar, pendentes, vencidas, salvarAgenda } from './agenda.mjs';
+import { agendar, pendentes, vencidas, salvarAgenda, cancelar as cancelarAgendada } from './agenda.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
@@ -452,6 +452,11 @@ let avaliarEnquetes = null;
 setInterval(() => avaliarEnquetes?.(), 60_000).unref?.();
 // Ações com timer: confere a cada 15 s.
 let rodarAgendadas = null;
+const horaBR = (ms) => new Date(ms).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+// Agendamentos que ainda não dispararam, para o Claude poder listar, cancelar ou trocar.
+const agendadasParaPrompt = (jid) => pendentes(jid).filter((a) => !a.historico).sort((a, b) => a.quando - b.quando)
+  .map((a) => `${a.id} | ${new Date(a.quando).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} | ${a.descricao}${a.mensagem ? `: "${a.mensagem.slice(0, 200)}"` : ''} (pedido por ${a.pedidoPor})`)
+  .join('\n');
 setInterval(() => rodarAgendadas?.(), 15_000).unref?.();
 let conectado = false;
 let filaClaude = Promise.resolve(); // uma pergunta por vez para o claude
@@ -886,6 +891,7 @@ async function iniciar() {
         entregas,
         materiais,
         grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid), fio,
+        agendadas: agendadasParaPrompt(jid),
         animacao: animado ? (animado.ext === 'webp' ? 'uma figurinha animada' : animado.gif ? 'um GIF' : 'um vídeo') : '',
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
         pessoas: pessoasParaPrompt(jid, meta),
@@ -949,6 +955,21 @@ async function iniciar() {
           }
         }
 
+        // Cancelar agendamentos que ainda não dispararam (antes de criar os novos: "troca a lição pro Nicolas").
+        if (v.acao === 'responder' && Array.isArray(v.cancelar_agendadas) && v.cancelar_agendadas.length) {
+          const canceladas = [];
+          for (const id of v.cancelar_agendadas.slice(0, 10)) {
+            const a = pendentes(jid).find((p) => p.id === String(id).trim());
+            if (!a || !cancelarAgendada(a.id)) { log(`Cancelar agendado ${id} (pedido de ${autor}): não achei.`); continue; }
+            canceladas.push(`${a.descricao} das ${horaBR(a.quando)}`);
+            log(`Agendado ${a.id} cancelado por ${autor}: ${a.descricao} das ${horaBR(a.quando)}${a.mensagem ? ` (mensagem "${a.mensagem.slice(0, 60)}")` : ''}.`);
+          }
+          if (canceladas.length) {
+            servico = servico ? `${servico} + Cancelado` : 'Cancelado';
+            resposta = [resposta, `❌ Cancelado: ${canceladas.join('; ')}.`].filter(Boolean).join('\n');
+          }
+        }
+
         // Ações com timer ("adiciona o Nicolas de volta em 10 min", "me lembra em 1 hora").
         if (v.acao === 'responder' && Array.isArray(v.agendadas) && v.agendadas.length) {
           const meta2 = await metadadosGrupo(jid).catch(() => meta);
@@ -982,7 +1003,7 @@ async function iniciar() {
             const descricao = admin ? descreverAcao(admin, meta2) : 'aviso';
             // historico_desde: se for "adicionar e mandar o histórico", conta a partir do pedido.
             agendar({ jid, quando, admin: admin ? { ...admin, historico_desde: Date.now() } : null, mensagem: a.mensagem || '', pedidoPor: autor, descricao });
-            const hora = new Date(quando).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+            const hora = horaBR(quando);
             feitas.push(`${descricao} às ${hora}`);
             log(`Agendado por ${autor} para ${hora} (em ${minutos} min): ${admin ? admin.acao + (admin.pessoas?.length ? ` (${admin.pessoas.join(', ')})` : '') : ''}${a.mensagem ? ` mensagem "${a.mensagem.slice(0, 60)}"` : ''}.`);
           }
