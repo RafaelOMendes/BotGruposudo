@@ -31,7 +31,7 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { acharArea, agoraBrasil, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, implementarNoCodigo, iniciarIA, interpretarMencao, memeDeRegra, respostaDeRegra } from './ia.mjs';
+import { acharArea, agoraBrasil, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, implementarNoCodigo, iniciarIA, interpretarMencao, memeDeRegra, responderNoPrivado, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, idsDeLinkClassroom, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
 import { contornar } from './contorno.mjs';
@@ -647,6 +647,8 @@ async function iniciar() {
       // depois do histórico chegar: liga os nomes (por número) aos participantes (por LID)
       setTimeout(() => ligarNomesDosGrupos().catch((e) => log('Nomes: erro', e.message)), 30_000);
       setTimeout(() => retomarPedidoDoDono().catch((e) => log('Implementar: erro ao refazer', e.message)), 15_000);
+      // Banidos que ainda não foram avisados no privado (ex: removidos antes desta função existir).
+      setTimeout(() => { for (const b of banimentos) if (b.ativo && Date.now() < voltaDoBan(b)) avisarBanido(b); }, 20_000);
     }
     if (connection === 'close') {
       conectado = false;
@@ -1510,6 +1512,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     banimentos.push(ban);
     salvarBans();
     log(`Banimento ${ban.id}: ${nome} (${fone}) removido a pedido de ${ban.pedidoPor}; volta às ${horaBR(ban.volta)}.`);
+    avisarBanido(ban); // no privado: até quando fica fora e que pode contestar ali
     return aviso;
   }
   // Banimentos que ainda valem, para o Claude saber quem dá para contestar (e o que já foi contestado).
@@ -1524,21 +1527,24 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
   }
   /**
    * Contestação de banimento: confere quem contesta (tem que estar no grupo e não ser o banido) e, se o
-   * Claude aceitou o argumento, adiciona de volta na hora e tira a volta antiga da agenda. Devolve { texto, pergunta }.
+   * Claude aceitou o argumento, adiciona de volta na hora e tira a volta antiga da agenda. Devolve { texto, pergunta, julgada }.
+   * Com `doBanido` (o banimento), é o próprio banido contestando pelo privado do bot: aí não precisa estar no grupo.
    */
-  async function contestarBanimento(c, { jid, m, autor, texto }) {
+  async function contestarBanimento(c, { jid, m, autor, texto, doBanido = null }) {
     const ativos = banimentos.filter((b) => b.jid === jid && b.ativo);
-    const ban = ativos.find((b) => b.id === String(c.banimento_id || '').trim()) || (ativos.length === 1 ? ativos[0] : null);
+    const ban = doBanido || ativos.find((b) => b.id === String(c.banimento_id || '').trim()) || (ativos.length === 1 ? ativos[0] : null);
     if (!ban) return { texto: ativos.length ? 'Contestar o banimento de quem?' : 'Não tem banimento valendo pra contestar.', pergunta: true };
     const meta = await sock.groupMetadata(jid); // na hora: quem está no grupo agora
-    const doAutor = [m.key.participant, m.key.participantAlt].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)));
-    const membro = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => doAutor.includes(digitos(jidNormalizedUser(i)))));
-    if (!membro) {
-      log(`Contestação do banimento ${ban.id} por ${autor} recusada: não está no grupo.`);
-      return { texto: 'Contestação não vale: só quem tá no grupo pode contestar.' };
+    if (!doBanido) {
+      const doAutor = [m.key.participant, m.key.participantAlt].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)));
+      const membro = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => doAutor.includes(digitos(jidNormalizedUser(i)))));
+      if (!membro) {
+        log(`Contestação do banimento ${ban.id} por ${autor} recusada: não está no grupo.`);
+        return { texto: 'Contestação não vale: só quem tá no grupo pode contestar (quem foi banido contesta no meu privado).' };
+      }
+      const idsAutor = [...doAutor, ...[membro.id, membro.lid, membro.phoneNumber].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)))];
+      if (idsAutor.some((i) => i === ban.fone || ban.ids.includes(i))) return { texto: 'Não dá pra contestar o próprio banimento aqui: manda o motivo no meu privado.' };
     }
-    const idsAutor = [...doAutor, ...[membro.id, membro.lid, membro.phoneNumber].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)))];
-    if (idsAutor.some((i) => i === ban.fone || ban.ids.includes(i))) return { texto: 'Não dá pra contestar o próprio banimento.' };
     const motivo = String(c.motivo || '').trim();
     if (!motivo) return { texto: texto?.trim() || `Qual o motivo da contestação do banimento de ${ban.nome}?`, pergunta: true };
     // Uma contestação por banimento: depois de negada, só volta a julgar se trouxer argumento novo.
@@ -1550,7 +1556,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     ban.contestacoes.push(registro);
     salvarBans();
     log(`Contestação do banimento ${ban.id} (${ban.nome}) por ${autor}: ${registro.aceita ? 'aceita' : 'negada'} ("${registro.motivo.slice(0, 80)}").`);
-    if (!registro.aceita) return { texto: texto?.trim() || 'Contestação negada, fica o tempo que tá.' };
+    if (!registro.aceita) return { texto: texto?.trim() || 'Contestação negada, fica o tempo que tá.', julgada: true };
 
     // Aceita: as voltas agendadas dessa pessoa (se alguma ia mandar o histórico, a volta de agora manda).
     const voltas = [];
@@ -1566,7 +1572,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       }, { jid, ctx: null, imagens: [], outrosMarcados: [], pedidoPor: autor });
     } catch (e) {
       log(`Contestação aceita, mas não deu para adicionar ${ban.nome} (${e.message}).`);
-      return { texto: `Contestação aceita, mas não consegui adicionar ${ban.nome}: ${e.message}.` };
+      return { texto: `Contestação aceita, mas não consegui adicionar ${ban.nome}: ${e.message}.`, julgada: true, aceita: true };
     }
     // Para não adicionar duas vezes: tira a pessoa das voltas agendadas (a agendada só some se era só ela).
     for (const a of voltas) {
@@ -1580,7 +1586,111 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       log(`Contestação aceita: volta agendada ${a.id} das ${horaBR(a.quando)} ${resto.length ? 'sem ' + ban.nome : 'cancelada'}.`);
     }
     if (!r.parcial) encerrarBanimento(jid, [ban.fone, ...ban.ids], 'contestação aceita');
-    return { texto: [r.resumoParcial || texto?.trim() || `Contestação aceita, ${ban.nome} de volta.`, r.parcial].filter(Boolean).join('\n') };
+    return { texto: [r.resumoParcial || texto?.trim() || `Contestação aceita, ${ban.nome} de volta.`, r.parcial].filter(Boolean).join('\n'), julgada: true, aceita: true };
+  }
+
+  // ---------- mensagens no PRIVADO do bot ----------
+  // O bot só ouvia grupos (o messages.upsert pulava o que não era grupo), então quem mandava no privado
+  // (ex: alguém banido querendo voltar) ficava sem resposta. Agora toda mensagem de gente no privado tem
+  // resposta: o banido fica sabendo até quando está fora e pode contestar ali (mesmo julgamento e mesma volta
+  // na hora da contestação do grupo, com aviso no grupo); quem não está banido conversa normal.
+  const conversasPrivadas = new Map(); // chat -> [{ quem, texto, em }] (últimas 2 h, para o Claude ter o fio)
+  const rodadaPrivado = new Map(); // chat -> nº da última mensagem (rajada: responde só a última)
+  const respostasPrivado = new Map(); // chat -> horas das últimas respostas (trava contra loop com outro bot)
+  const ehPrivado = (jid) => /@(s\.whatsapp\.net|lid)$/.test(jid || '');
+  function lembrarPrivado(chat, quem, texto) {
+    const l = (conversasPrivadas.get(chat) || []).filter((x) => Date.now() - x.em < 2 * 60 * 60e3);
+    l.push({ quem, texto: String(texto).replace(/\s+/g, ' ').slice(0, 500), em: Date.now() });
+    conversasPrivadas.set(chat, l.slice(-14));
+  }
+  async function enviarPrivado(destino, texto) {
+    const msg = await sock.sendMessage(destino, { text: texto });
+    if (msg?.key?.id) enviadas.set(msg.key.id, msg.message); // para reenviar se o aparelho pedir (retry)
+    lembrarPrivado(destino, 'Bot', texto);
+    return msg;
+  }
+  /** Banimento ativo de quem mandou no privado (pelo LID ou pelo número), o mais recente. */
+  async function banDoPrivado(ids) {
+    const todos = new Set();
+    for (const i of ids) for (const x of await idsDaPessoa(i, null)) todos.add(digitos(x));
+    return banimentos.filter((b) => b.ativo && Date.now() - b.em < 24 * 60 * 60e3 && (todos.has(b.fone) || b.ids.some((i) => todos.has(i)))).sort((a, b) => b.em - a.em)[0] || null;
+  }
+  const voltaDoBan = (b) => pendentes(b.jid).find((a) => a.id === b.agendaId)?.quando || b.volta;
+  const nomeDoGrupo = async (jid) => (await metadadosGrupo(jid).catch(() => null))?.subject || 'grupo';
+  function banParaPrompt(b) {
+    const cont = b.contestacoes.length
+      ? b.contestacoes.map((c) => `${c.por} contestou às ${horaBR(c.em)} ("${c.motivo.slice(0, 150)}"): ${c.aceita ? 'aceita' : 'NEGADA'}`).join('; ')
+      : 'sem contestação';
+    return `removido às ${horaBR(b.em)} a pedido de ${b.pedidoPor} | volta às ${horaBR(voltaDoBan(b))} | ${cont}`;
+  }
+  const avisoDeBan = (b, grupo) => `Você tá fora do *${grupo}* até as ${horaBR(voltaDoBan(b))} (no máximo ${BAN_MAX_MIN} min), aí volta sozinho. Achou injusto? Me manda aqui o motivo que eu avalio a contestação.`;
+  /** Avisa no privado quem o bot acabou de remover (uma vez por banimento), para ninguém ficar sem saber. */
+  async function avisarBanido(b) {
+    if (!b.ativo || b.avisado) return;
+    b.avisado = true;
+    salvarBans();
+    // Sem o número de telefone, o banimento guarda o LID (14+ dígitos): manda por ele.
+    const destino = `${b.fone}@${b.fone.length >= 14 ? 'lid' : 's.whatsapp.net'}`;
+    try {
+      await enviarPrivado(destino, avisoDeBan(b, await nomeDoGrupo(b.jid)));
+      log(`Banimento ${b.id}: avisei ${b.nome} no privado (volta e como contestar).`);
+    } catch (e) {
+      log(`Banimento ${b.id}: não deu para avisar ${b.nome} no privado (${e.message}).`);
+    }
+  }
+
+  async function responderPrivado(m) {
+    const chat = m.key.remoteJid;
+    const texto = resumo(conteudo(m)).trim();
+    if (!texto) return; // reação, aviso do sistema, enquete...
+    jaRespondidas.add(m.key.id);
+    const autor = m.pushName || nomeDaPessoa(chat, m.key.remoteJidAlt) || digitos(chat);
+    lembrarPrivado(chat, autor, texto);
+    // Rajada ("oi" / "por que me tirou" / "volta eu"): espera um pouco e responde tudo de uma vez.
+    const rodada = (rodadaPrivado.get(chat) || 0) + 1;
+    rodadaPrivado.set(chat, rodada);
+    await new Promise((ok) => setTimeout(ok, 4000));
+    if (rodadaPrivado.get(chat) !== rodada) return;
+    const recentes = (respostasPrivado.get(chat) || []).filter((t) => Date.now() - t < 10 * 60e3);
+    if (recentes.length >= 15) { log(`Privado de ${autor} ignorado: respostas demais em 10 min.`); return; }
+
+    const ban = await banDoPrivado([chat, m.key.remoteJidAlt].filter(Boolean));
+    const grupo = ban ? await nomeDoGrupo(ban.jid) : '';
+    const conversa = (conversasPrivadas.get(chat) || []).slice(0, -1).map((x) => `[${horaBR(x.em)}] ${x.quem}: ${x.texto}`);
+    log(`Privado de ${autor}${ban ? ` (banido: ${ban.id}, volta às ${horaBR(voltaDoBan(ban))})` : ''}: "${texto.slice(0, 80)}"`);
+    await sock.sendPresenceUpdate('composing', chat).catch(() => {});
+    let v;
+    try {
+      if (!ia) throw new Error('claude CLI não encontrado');
+      v = await naFilaDoClaude(() => responderNoPrivado({ autor: ban?.nome || autor, mensagem: texto, conversa, banimento: ban ? banParaPrompt(ban) : '', grupo }));
+    } catch (e) {
+      log(`Privado de ${autor}: o Claude não respondeu (${e.message}).`);
+      v = { responder: true, texto: ban ? avisoDeBan(ban, grupo) : 'Deu ruim aqui pra responder agora, tenta de novo daqui a pouco.', contestacao: { fazer: false } };
+    }
+    if (!ban && v.responder === false) { log(`Privado de ${autor}: não respondi (spam/automática).`); return; }
+    let resposta = String(v.texto || '').trim() || (ban ? avisoDeBan(ban, grupo) : '');
+
+    // Contestação pelo próprio banido: mesmo julgamento do grupo; se aceitar, volta na hora e o grupo fica sabendo.
+    if (ban && v.contestacao?.fazer) {
+      const motivo = String(v.contestacao.motivo || '').trim();
+      try {
+        const r = await contestarBanimento({ ...v.contestacao, banimento_id: ban.id }, { jid: ban.jid, m, autor: ban.nome, texto: v.texto, doBanido: ban });
+        resposta = r.texto || resposta;
+        if (r.julgada) {
+          const noGrupo = r.aceita
+            ? `${ban.nome} contestou no privado ("${motivo.slice(0, 200)}"): aceita, de volta.`
+            : `${ban.nome} contestou no privado ("${motivo.slice(0, 200)}"): negada, volta às ${horaBR(voltaDoBan(ban))}.`;
+          guardarEnviada(await sock.sendMessage(ban.jid, { text: marcaServico('Contestação', noGrupo) }));
+        }
+      } catch (e) {
+        log(`Contestação de ${ban.nome} no privado não deu (${e.message}).`);
+        resposta = `Não consegui avaliar a contestação agora (${e.message}). Tenta de novo daqui a pouco.`;
+      }
+    }
+    if (!resposta) return;
+    await enviarPrivado(chat, resposta);
+    respostasPrivado.set(chat, [...recentes, Date.now()]);
+    log(`Respondi no privado ${autor}: "${resposta.slice(0, 80)}"`);
   }
 
   async function mandarHistorico(jid, destino, desde, meta, ate = 0, saiuEm = 0) {
@@ -2303,7 +2413,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     for (const m of messages) {
       try {
         const jid = m.key.remoteJid;
-        if (!isJidGroup(jid)) continue;
+        if (!isJidGroup(jid)) {
+          // Privado (chat direto com o bot): ninguém fica sem resposta (roda à parte: espera a rajada acabar).
+          const recente = Date.now() / 1000 - Number(m.messageTimestamp || 0) <= CONFIG.idadeMaxSeg;
+          if (ehPrivado(jid) && !m.key.fromMe && recente && !jaRespondidas.has(m.key.id) && CONFIG.mencao.ativo) {
+            responderPrivado(m).catch((e) => log('Erro ao responder no privado:', e.stack || e));
+          }
+          continue;
+        }
         // Voto numa enquete do bot: conta e, se aprovou, executa a ação.
         if (m.message?.pollUpdateMessage) { await tratarVoto(m); continue; }
         const edicao = edicaoDe(m);

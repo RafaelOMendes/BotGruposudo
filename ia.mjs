@@ -592,7 +592,8 @@ anteriores) e decida com bom senso em "aceitar" (true = vale trazer de volta ago
 (ban de zoeira sem motivo, a pessoa não fez nada, já pagou, quem pediu o ban concordou); negue argumento fraco,
 "porque sim" ou spam. Banimento com contestação já negada: argumento_novo = true só se o motivo traz algo
 realmente novo; senão aceitar = false. Sem motivo: aceitar = false e o "texto" pergunta qual é o motivo (o bot
-não decide ainda). Quem contesta tem que estar no grupo e não pode ser o banido: o bot confere isso. O "texto" é
+não decide ainda). Quem contesta tem que estar no grupo e não pode ser o banido: o bot confere isso (o banido
+contesta mandando o motivo no privado do bot, e o bot responde ele lá). O "texto" é
 UMA frase curta, zoeira leve e sem ataque (ex: "Contestação aceita, Nicolas de volta.", "Contestação negada,
 fica o tempo que tá."). Na contestação admin.acao = "nenhuma" e agendadas = cancelar_agendadas = []: o bot
 adiciona e tira a volta antiga da agenda sozinho. Você CONSEGUE: não diga que não. Sem contestação: fazer = false,
@@ -807,6 +808,80 @@ comentário solto), reaja a ela no tom da conversa.`);
   }
   if (aposImplementar && v.implementar) v.implementar.fazer = false; // não entra em loop de implementar
   if (!dono && v.implementar) v.implementar.fazer = false;
+  return v;
+}
+
+// ---------- mensagem no PRIVADO do bot ----------
+const SCHEMA_PRIVADO = {
+  type: 'object',
+  properties: {
+    responder: { type: 'boolean', description: 'false só para spam/golpe/mensagem automática de quem NÃO está banido; banido sempre recebe resposta' },
+    texto: { type: 'string', description: 'a resposta que vai no privado da pessoa' },
+    contestacao: {
+      type: 'object',
+      description: 'a pessoa banida contestou o próprio banimento (fazer=false se não contestou ou não está banida)',
+      properties: {
+        fazer: { type: 'boolean' },
+        motivo: { type: 'string', description: 'o argumento dela, com as palavras dela; "" se não deu motivo' },
+        aceitar: { type: 'boolean', description: 'true = o argumento convenceu e ela volta pro grupo agora' },
+        argumento_novo: { type: 'boolean', description: 'já teve contestação negada: true só se o motivo traz algo realmente novo' },
+      },
+      required: ['fazer', 'motivo', 'aceitar', 'argumento_novo'],
+      additionalProperties: false,
+    },
+  },
+  required: ['responder', 'texto', 'contestacao'],
+  additionalProperties: false,
+};
+
+const SISTEMA_PRIVADO = `Você é o "Bot do Gabreu", o bot de um grupo de amigos do WhatsApp. Alguém mandou mensagem
+no seu PRIVADO (chat direto com você, fora do grupo). A data e a hora atuais (horário de Brasília) vêm no começo.
+
+SE A PESSOA ESTÁ BANIDA (vem "Banimento ativo" com os dados): ela foi removida do grupo pelo bot e volta
+sozinha na hora marcada (ninguém fica fora mais de 30 min). SEMPRE responda (responder = true), curto e educado,
+zoeira leve permitida, sem ataque:
+- Mensagem sem argumento ("oi", "por que me tiraram?", "me volta", xingamento, figurinha): diga que ela está
+  fora até a hora da volta e que pode contestar mandando o motivo aqui; pergunte qual é o motivo.
+  contestacao.fazer = false.
+- Ela deu um argumento para voltar ("não fiz nada", "foi zoeira", "quem pediu já concordou", "já aprendi"):
+  contestacao.fazer = true, motivo = o argumento com as palavras dela. VOCÊ é o juiz: leia o argumento, a
+  conversa e os dados do banimento (quem pediu, quando, contestações anteriores) e decida com bom senso em
+  "aceitar". Aceite argumento razoável (ban de zoeira sem motivo, não fez nada, já pagou, quem pediu concordou);
+  negue argumento fraco, "porque sim", choro sem argumento ou spam. Já teve contestação NEGADA:
+  argumento_novo = true só se trouxe algo realmente novo; senão aceitar = false. O "texto" é UMA frase curta
+  (ex: "Contestação aceita, te coloquei de volta.", "Contestação negada, volta às 12:51 mesmo."). O bot
+  adiciona de volta e avisa o grupo sozinho: não diga que não consegue.
+SE NÃO ESTÁ BANIDA: responda normal, como responderia no grupo (conversa, dúvida, pesquisa na web se precisar),
+1 a 3 frases. contestacao.fazer = false. Pedido que só dá para fazer no grupo (figurinha, regra, admin,
+agendar): diga para marcar o bot com @ no grupo. responder = false só se for claramente spam, golpe,
+propaganda ou mensagem automática; na dúvida, responda.
+Sem contestação: contestacao = { fazer: false, motivo: "", aceitar: false, argumento_novo: false }.
+Formatação do WhatsApp, nada de # nem tabelas.
+
+Tom:
+${TOM}
+${SEGURANCA}`;
+
+/** Mensagem no privado do bot: responde e, se a pessoa está banida, julga a contestação dela. */
+export async function responderNoPrivado({ autor, mensagem, conversa = [], banimento = '', grupo = '' }) {
+  const texto = [
+    `Agora são ${agoraBrasil()} (horário de Brasília).`,
+    banimento
+      ? `Banimento ativo de ${autor} no grupo "${grupo}":\n${banimento}`
+      : `${autor} NÃO está banida de nenhum grupo.`,
+    conversa.length ? `Conversa no privado até agora (mais antigas primeiro):\n${conversa.join('\n')}` : '',
+    `Mensagem de ${autor} no seu privado:\n${mensagem || '(sem texto)'}`,
+  ].filter(Boolean).join('\n\n');
+  const r = await perguntar({
+    sistema: SISTEMA_PRIVADO, conteudo: [{ type: 'text', text: texto }], schema: SCHEMA_PRIVADO, tarefa: 'mencao',
+    ferramentas: banimento ? [] : ['WebSearch', 'WebFetch'],
+  });
+  const v = r.structured_output;
+  if (typeof v?.texto !== 'string') {
+    const puro = String(r.result || '').trim();
+    if (!puro) throw new Error('claude devolveu resposta vazia');
+    return { responder: true, texto: puro, contestacao: { fazer: false } };
+  }
   return v;
 }
 
