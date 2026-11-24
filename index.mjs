@@ -31,7 +31,7 @@ import makeWASocket, {
   jidNormalizedUser,
   useMultiFileAuthState,
 } from 'baileys';
-import { acharArea, agoraBrasil, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, implementarNoCodigo, iniciarIA, interpretarMencao, memeDeRegra, responderNoPrivado, respostaDeRegra } from './ia.mjs';
+import { acharArea, agoraBrasil, avaliarEntregas, avaliarNonsense, configurarModelos, falaramComOBot, implementarNoCodigo, iniciarIA, interpretarMencao, julgarBanimento, memeDeRegra, responderNoPrivado, respostaDeRegra } from './ia.mjs';
 import { iniciarAvisos, listaParaPergunta, PERGUNTA_ENTREGA } from './entregas.mjs';
 import { vigiarLogin, manterMateriais, indiceMateriais, idsDeLinkClassroom, PASTA_MATERIAIS, PERGUNTA_AULA } from './classroom.mjs';
 import { contornar } from './contorno.mjs';
@@ -458,6 +458,9 @@ const agendadasParaPrompt = (jid) => pendentes(jid).filter((a) => !a.historico).
   .map((a) => `${a.id} | ${new Date(a.quando).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} | ${a.descricao}${a.mensagem ? `: "${a.mensagem.slice(0, 200)}"` : ''} (pedido por ${a.pedidoPor})`)
   .join('\n');
 setInterval(() => rodarAgendadas?.(), 15_000).unref?.();
+// Julgamentos antes do banimento: quando o prazo da defesa acaba, dá o veredito (confere a cada 15 s).
+let conferirJulgamentos = null;
+setInterval(() => conferirJulgamentos?.(), 15_000).unref?.();
 let conectado = false;
 let filaClaude = Promise.resolve(); // uma pergunta por vez para o claude
 const naFilaDoClaude = (f) => {
@@ -896,6 +899,7 @@ async function iniciar() {
         grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid), fio,
         agendadas: agendadasParaPrompt(jid),
         banimentos: banimentosParaPrompt(jid),
+        julgamentos: julgamentosParaPrompt(jid),
         animacao: animado ? (animado.ext === 'webp' ? 'uma figurinha animada' : animado.gif ? 'um GIF' : 'um vídeo') : '',
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
         pessoas: pessoasParaPrompt(jid, meta),
@@ -912,6 +916,7 @@ async function iniciar() {
       let anexos = [];
       let figurinhaPronta = null;
       let servico = null; // quando o bot fez um serviço (não só respondeu), a mensagem leva uma marca
+      const idsDoAutor = [m.key.participant, m.key.participantAlt].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)));
       // Gerar imagem leva ~1 a 2 min: avisa na hora para ninguém achar que travou.
       const avisarGerando = async () => {
         guardarEnviada(await sock.sendMessage(jid, { text: marcaServico('Gerando imagem', 'Começou aqui, leva uns 1 a 2 minutos.') }, { quoted: m }));
@@ -957,9 +962,41 @@ async function iniciar() {
           }
         }
 
+        // Fala num julgamento aberto (defesa, acusação, o julgado pedindo um defensor): o bot anota para o veredito.
+        if (v.acao === 'responder' && v.julgamento?.fazer) {
+          try {
+            const r = await falarNoJulgamento(v.julgamento, { jid, idsAutor: idsDoAutor, autor, onde: 'grupo' });
+            if (r.texto) {
+              resposta = [r.texto, r.avisoGrupo].filter(Boolean).join('\n');
+              servico = 'Julgamento';
+            }
+          } catch (e) {
+            log(`Julgamento: fala de ${autor} não deu (${e.message}).`);
+          }
+        }
+
+        // Ban pedido por quem não é o dono do bot: não remove na hora, abre um julgamento (o veredito sai no prazo).
+        // A volta com tempo pedida junto ("bane por 10 min") fica guardada no julgamento para a hora da condenação.
+        const julgar = v.acao === 'responder' && v.admin?.acao === 'remover' && !dono && !v.contestacao?.fazer;
+        if (julgar && !v.julgamento?.fazer) {
+          try {
+            const voltas = (v.agendadas || []).filter((x) => x.admin?.acao === 'adicionar');
+            const r = await abrirJulgamentos(v.admin, {
+              jid, ctx, outrosMarcados, pedidoPor: autor, pedidoPorIds: idsDoAutor, voltas,
+              pedido: `${autor}: "${pedido || '(só marcou o bot)'}"${citada ? ` (respondendo ${citada.slice(0, 300)})` : ''}`,
+            });
+            v.agendadas = (v.agendadas || []).filter((x) => !r.consumidas.includes(x));
+            resposta = r.texto;
+            servico = 'Julgamento';
+          } catch (e) {
+            log(`Julgamento pedido por ${autor} não deu (${e.message}).`);
+            resposta = `Não consegui abrir o julgamento: ${e.message}.`;
+          }
+        }
+
         // Função de admin (remover, adicionar, promover, nome, link...): só confirma depois de conseguir.
         // (Na contestação quem adiciona é ela: não executa um "adicionar" repetido.)
-        if (v.acao === 'responder' && v.admin?.acao && v.admin.acao !== 'nenhuma' && !v.contestacao?.fazer) {
+        if (v.acao === 'responder' && v.admin?.acao && v.admin.acao !== 'nenhuma' && !v.contestacao?.fazer && !julgar) {
           try {
             const r = await executarAdmin(v.admin, { jid, ctx, imagens, outrosMarcados, pedidoPor: autor });
             log(`Admin: ${v.admin.acao}${v.admin.pessoas?.length ? ` (${v.admin.pessoas.join(', ')})` : ''} pedido por ${autor}: feito (${r.detalhe}).`);
@@ -1058,7 +1095,8 @@ async function iniciar() {
             const quando = Date.now() + minutos * 60e3;
             const descricao = admin ? descreverAcao(admin, meta2) : 'aviso';
             // historico_desde: se for "adicionar e mandar o histórico", conta a partir do pedido.
-            agendar({ jid, quando, admin: admin ? { ...admin, historico_desde: Date.now() } : null, mensagem: a.mensagem || '', pedidoPor: autor, descricao });
+            // Remoção agendada por quem não é o dono do bot vira julgamento na hora marcada (semJulgamento = pedido do dono).
+            agendar({ jid, quando, admin: admin ? { ...admin, historico_desde: Date.now() } : null, mensagem: a.mensagem || '', pedidoPor: autor, descricao, semJulgamento: dono, pedidoPorIds: idsDoAutor });
             const hora = horaBR(quando);
             feitas.push(`${descricao} às ${hora}`);
             log(`Agendado por ${autor} para ${hora} (em ${minutos} min): ${admin ? admin.acao + (admin.pessoas?.length ? ` (${admin.pessoas.join(', ')})` : '') : ''}${a.mensagem ? ` mensagem "${a.mensagem.slice(0, 60)}"` : ''}.`);
@@ -1485,6 +1523,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     const fone = p?.phoneNumber ? digitos(jidNormalizedUser(p.phoneNumber)) : await telefoneDe(digitos(jidNormalizedUser(j)), meta);
     if (!ids.includes(fone)) ids.push(fone);
     encerrarBanimento(jid, ids, 'removido de novo');
+    // Removido por outro caminho (pedido do dono, enquete) durante o julgamento: o julgamento acaba.
+    for (const x of julgamentos) {
+      if (x.jid === jid && x.status === 'aberto' && ids.some((i) => i === x.fone || x.ids.includes(i))) fecharJulgamento(x, 'encerrado', `removido a pedido de ${pedidoPor || 'alguém'}`);
+    }
     const nome = nomeDaPessoa(j, p?.id, p?.lid, p?.phoneNumber) || `+${fone}`;
     const agora = Date.now();
     const limite = agora + BAN_MAX_MIN * 60e3;
@@ -1589,6 +1631,211 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     return { texto: [r.resumoParcial || texto?.trim() || `Contestação aceita, ${ban.nome} de volta.`, r.parcial].filter(Boolean).join('\n'), julgada: true, aceita: true };
   }
 
+  // ---------- julgamento antes do banimento ----------
+  // Pedido de ban de quem não é o dono do bot não remove na hora: abre um julgamento em .julgamentos.json
+  // ({ id, jid, alvo, fone, ids, nome, pedidoPor, pedidoPorIds, pedido, em, prazo, falas, volta, defensor, status }).
+  // O bot avisa no grupo quem é julgado e quem pediu; o julgado se defende (sozinho ou pedindo um defensor)
+  // no grupo ou no privado até o prazo. Aí o Claude dá o veredito (quem pediu o ban é só acusação):
+  // condenado = remove e vira banimento (volta em até 30 min, contestação depois); absolvido = fica.
+  const JULG_PRAZO_MIN = 5;
+  const JULG_EXTRA_MIN = 3; // o julgado pediu um defensor: o prazo estica (uma vez) para ele falar
+  const ARQ_JULG = path.join(DIR, '.julgamentos.json');
+  let julgamentos = [];
+  try { julgamentos = JSON.parse(fs.readFileSync(ARQ_JULG, 'utf8')); } catch { /* nenhum */ }
+  const salvarJulg = () => {
+    while (julgamentos.length > 200) julgamentos.shift();
+    try { fs.writeFileSync(ARQ_JULG, JSON.stringify(julgamentos, null, 1)); } catch { /* tenta na próxima */ }
+  };
+  const julgAbertos = (jid) => julgamentos.filter((j) => j.status === 'aberto' && (!jid || j.jid === jid));
+  const ehDaPessoa = (lista, ids) => ids.some((i) => i && lista.includes(i));
+  function fecharJulgamento(j, status, motivo) {
+    Object.assign(j, { status, fim: Date.now(), motivo: String(motivo || '').slice(0, 300) });
+    salvarJulg();
+    log(`Julgamento ${j.id} de ${j.nome}: ${status}${motivo ? ` (${String(motivo).slice(0, 120)})` : ''}.`);
+  }
+  // Quem está falando no julgamento (para o juiz pesar: a palavra de quem pediu o ban é só acusação).
+  const papelNoJulgamento = (j, ids) => (ehDaPessoa([j.fone, ...j.ids], ids) ? 'julgado'
+    : ehDaPessoa(j.pedidoPorIds || [], ids) ? 'quem pediu o ban'
+    : ehDaPessoa(j.defensor?.ids || [], ids) ? 'defensor pedido pelo julgado' : 'outro membro');
+  // Julgamentos em andamento, para o Claude saber quem está sendo julgado e o que já foi dito.
+  function julgamentosParaPrompt(jid) {
+    return julgAbertos(jid).map((j) => {
+      const falas = j.falas.length ? j.falas.slice(-6).map((f) => `${f.por} (${f.papel}): "${f.texto.slice(0, 120)}"`).join('; ') : 'ninguém falou ainda';
+      return `${j.id} | ${j.nome} = @${digitos(j.alvo)} | pedido por ${j.pedidoPor} | veredito às ${horaBR(j.prazo)}${j.defensor ? ` | defensor: ${j.defensor.nome}` : ''} | ${falas}`;
+    }).join('\n');
+  }
+
+  /**
+   * Abre um julgamento para cada pessoa do pedido de remoção (em vez de remover). Devolve { texto, consumidas }:
+   * o aviso para o grupo e as agendadas de volta ("bane por 10 min") que ficaram guardadas nos julgamentos.
+   */
+  async function abrirJulgamentos(a, { jid, ctx, outrosMarcados = [], pedidoPor, pedidoPorIds = [], pedido = '', voltas = [] }) {
+    const meta = await sock.groupMetadata(jid); // na hora: quem está no grupo agora
+    const eu = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => meusIds().includes(jidNormalizedUser(i))));
+    if (!eu?.admin) throw new Error('não sou admin do grupo, então não conseguiria cumprir a condenação');
+    const participante = (n) => (meta.participants || []).find((x) =>
+      [x.id, x.lid, x.phoneNumber].filter(Boolean).some((j) => digitos(jidNormalizedUser(j)) === n));
+    let alvos = [...new Set((a.pessoas || []).map(digitos).filter((n) => n.length >= 8))].map(participante).filter(Boolean);
+    // Sem número: quem foi marcado na mensagem, ou o autor da mensagem respondida.
+    if (!alvos.length) alvos = (outrosMarcados.length ? outrosMarcados : ctx?.participant ? [ctx.participant] : []).map((j) => participante(digitos(jidNormalizedUser(j)))).filter(Boolean);
+    alvos = [...new Set(alvos)].filter((p) => ![p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => meusIds().includes(jidNormalizedUser(i))));
+    if (!alvos.length) throw new Error('não achei quem é a pessoa no grupo');
+    const acusador = pedidoPorIds.map(participante).find(Boolean);
+    const quemPediu = acusador ? `@${digitos(acusador.id)}` : pedidoPor;
+    const consumidas = [];
+    const textos = [];
+    for (const p of alvos) {
+      const ids = [...new Set([p.id, p.lid, p.phoneNumber].filter(Boolean).map((i) => digitos(jidNormalizedUser(i))))];
+      const fone = p.phoneNumber ? digitos(jidNormalizedUser(p.phoneNumber)) : await telefoneDe(digitos(jidNormalizedUser(p.id)), meta);
+      if (!ids.includes(fone)) ids.push(fone);
+      const nome = nomeDaPessoa(p.id, p.lid, p.phoneNumber) || `+${fone}`;
+      const ja = julgAbertos(jid).find((j) => ehDaPessoa([j.fone, ...j.ids], ids));
+      if (ja) { textos.push(`${nome} já está em julgamento: veredito às ${horaBR(ja.prazo)}.`); continue; }
+      // Volta com tempo pedida junto (neste pedido, ou já na agenda quando a remoção era agendada).
+      let volta = null;
+      for (const x of voltas) {
+        if (!consumidas.includes(x) && (await fonesDe(x.admin.pessoas, meta)).includes(fone)) {
+          volta = { minutos: Math.max(0.25, Number(x.minutos) || 0), admin: x.admin, mensagem: x.mensagem || '' };
+          consumidas.push(x);
+          break;
+        }
+      }
+      if (!volta) {
+        for (const x of pendentes(jid)) {
+          if (x.admin?.acao !== 'adicionar' || (x.admin.pessoas || []).length > 1 || !(await fonesDe(x.admin.pessoas, meta)).includes(fone)) continue;
+          volta = { minutos: Math.max(0.25, (x.quando - Date.now()) / 60e3), admin: x.admin, mensagem: x.mensagem || '' };
+          cancelarAgendada(x.id);
+          log(`Julgamento: a volta agendada ${x.id} de ${nome} fica guardada para depois do veredito.`);
+          break;
+        }
+      }
+      const agora = Date.now();
+      const j = {
+        id: crypto.randomBytes(3).toString('hex'), jid, alvo: p.id, fone, ids, nome, pedidoPor: pedidoPor || 'alguém', pedidoPorIds,
+        pedido: String(pedido).slice(0, 800), em: agora, prazo: agora + JULG_PRAZO_MIN * 60e3, falas: [], volta, defensor: null, status: 'aberto',
+      };
+      julgamentos.push(j);
+      salvarJulg();
+      log(`Julgamento ${j.id} aberto: ${nome} (${fone}), ban pedido por ${j.pedidoPor}; veredito às ${horaBR(j.prazo)}.`);
+      textos.push(`⚖️ Julgamento de @${digitos(p.id)}: ${quemPediu} pediu o ban. Antes de banir eu ouço a defesa: até as ${horaBR(j.prazo)} (${JULG_PRAZO_MIN} min) ${nome} pode se defender aqui (me marcando ou respondendo esta mensagem) ou no meu privado, ou pedir pra alguém do grupo defender. Quem pediu o ban não decide: no fim eu dou o veredito.`);
+      // No privado do julgado também, para ele não perder o prazo.
+      const destino = jidNormalizedUser(p.phoneNumber || p.id);
+      enviarPrivado(destino, `Pediram teu ban no *${meta.subject}* (${j.pedidoPor}). Antes de decidir eu ouço tua defesa: manda aqui (ou no grupo, me marcando) teu argumento até as ${horaBR(j.prazo)}. Se quiser, diz quem do grupo te defende.`)
+        .then(() => log(`Julgamento ${j.id}: avisei ${nome} no privado.`), (e) => log(`Julgamento ${j.id}: não deu para avisar ${nome} no privado (${e.message}).`));
+    }
+    return { texto: textos.join('\n'), consumidas };
+  }
+
+  /**
+   * Fala num julgamento aberto (no grupo ou no privado): guarda o argumento com o papel de quem falou e, se o
+   * julgado pediu um defensor, estica o prazo uma vez e chama o defensor no grupo. Devolve { texto, avisoGrupo }.
+   */
+  async function falarNoJulgamento(f, { jid = null, idsAutor, autor, onde }) {
+    const abertos = julgAbertos(jid);
+    const j = abertos.find((x) => x.id === String(f.julgamento_id || '').trim()) || (abertos.length === 1 ? abertos[0] : null);
+    if (!j) return {};
+    const papel = papelNoJulgamento(j, idsAutor);
+    const argumento = String(f.argumento || '').trim();
+    if (argumento) {
+      j.falas.push({ por: autor, papel, texto: argumento.slice(0, 600), onde, em: Date.now() });
+      while (j.falas.length > 40) j.falas.shift();
+      log(`Julgamento ${j.id} (${j.nome}): ${autor} (${papel}, ${onde}): "${argumento.slice(0, 80)}".`);
+    }
+    let avisoGrupo = '';
+    const pedido = String(f.defensor || '').trim();
+    if (pedido && papel === 'julgado' && !j.defensor) {
+      const meta = await metadadosGrupo(j.jid).catch(() => null);
+      const alvo = normalizar(pedido.replace(/^@/, ''));
+      const p = (meta?.participants || []).find((x) => {
+        const ids = [x.id, x.lid, x.phoneNumber].filter(Boolean);
+        return ids.some((i) => digitos(jidNormalizedUser(i)) === digitos(pedido)) || (alvo && normalizar(nomeDaPessoa(...ids) || '').includes(alvo));
+      });
+      if (p) {
+        const ids = [p.id, p.lid, p.phoneNumber].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)));
+        j.defensor = { nome: nomeDaPessoa(p.id, p.lid, p.phoneNumber) || pedido, ids };
+        j.prazo = Math.max(j.prazo, Date.now() + JULG_EXTRA_MIN * 60e3);
+        avisoGrupo = `⚖️ @${digitos(p.id)}, ${j.nome} pediu tua defesa: manda o argumento até as ${horaBR(j.prazo)} (aqui me marcando ou no meu privado).`;
+        log(`Julgamento ${j.id}: ${j.nome} pediu a defesa de ${j.defensor.nome}; veredito às ${horaBR(j.prazo)}.`);
+      }
+    }
+    salvarJulg();
+    if (!argumento && !avisoGrupo) return { texto: `Qual é o argumento? O veredito de ${j.nome} sai às ${horaBR(j.prazo)}.`, j };
+    const lado = papel === 'quem pediu o ban' ? 'na acusação' : papel === 'outro membro' ? 'no julgamento' : 'na defesa';
+    return { texto: argumento ? `Anotado ${lado}. Veredito às ${horaBR(j.prazo)}.` : '', avisoGrupo, j };
+  }
+
+  /** Prazo acabou: o Claude julga e o bot cumpre (remove ou não) e avisa o grupo numa frase. */
+  const decidindo = new Set();
+  async function darVeredito(j) {
+    decidindo.add(j.id);
+    try {
+      const meta = await sock.groupMetadata(j.jid);
+      const enviar = async (texto) => guardarEnviada(await sock.sendMessage(j.jid, { text: marcaServico('Julgamento', texto), mentions: mencoesDoTexto(texto, meta) }));
+      const presente = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => [j.fone, ...j.ids].includes(digitos(jidNormalizedUser(i)))));
+      if (!presente) {
+        fecharJulgamento(j, 'encerrado', 'saiu do grupo antes do veredito');
+        await enviar(`${j.nome} saiu antes do veredito; julgamento encerrado.`);
+        return;
+      }
+      const conversa = mensagensEntre(j.jid, [], Math.floor(j.em / 1000) - 120, Math.floor(Date.now() / 1000)).slice(-80)
+        .map((x) => `[${horaBR(x.em * 1000)}] ${x.nome}: ${x.citada ? `(respondendo ${x.citada.nome}: "${x.citada.texto.slice(0, 80)}") ` : ''}${x.texto.slice(0, 300)}`);
+      const falas = j.falas.map((f) => `[${horaBR(f.em)}] ${f.por} (${f.papel}${f.onde === 'privado' ? ', no privado do bot' : ''}): ${f.texto}`);
+      let v;
+      try {
+        v = await naFilaDoClaude(() => julgarBanimento({ grupo: meta.subject, julgado: j.nome, pedidoPor: j.pedidoPor, pedido: j.pedido, falas, conversa }));
+      } catch (e) {
+        // Sem veredito, ninguém sai: tenta de novo em 1 min (3 vezes) e, se não der, absolve.
+        j.tentativas = (j.tentativas || 0) + 1;
+        log(`Julgamento ${j.id}: o Claude não deu o veredito (${e.message}); tentativa ${j.tentativas}.`);
+        if (j.tentativas < 3) { j.prazo = Date.now() + 60e3; salvarJulg(); return; }
+        v = { banir: false, frase: `Absolvido: não consegui julgar, ${j.nome} fica.`, motivo: 'sem veredito do Claude' };
+      }
+      const frase = String(v.frase || '').trim().replace(/\s+/g, ' ');
+      if (!v.banir) {
+        fecharJulgamento(j, 'absolvido', v.motivo);
+        await enviar(/^absolvid/i.test(frase) ? frase : `Absolvido: ${j.nome} fica.`);
+        return;
+      }
+      // Condenado: o status muda antes de remover (a remoção não fecha este julgamento como "removido por outro").
+      fecharJulgamento(j, 'condenado', v.motivo);
+      let voltaId = null;
+      if (j.volta && j.volta.minutos < BAN_MAX_MIN) {
+        voltaId = agendar({
+          jid: j.jid, quando: Date.now() + j.volta.minutos * 60e3, mensagem: j.volta.mensagem, pedidoPor: j.pedidoPor,
+          descricao: descreverAcao(j.volta.admin, meta), admin: { ...j.volta.admin, historico_desde: Date.now() },
+        });
+      }
+      try {
+        const r = await executarAdmin({ acao: 'remover', pessoas: [digitos(jidNormalizedUser(presente.id))], texto: '', tempo: '', mandar_historico: false, historico_completo: false },
+          { jid: j.jid, ctx: null, imagens: [], outrosMarcados: [], pedidoPor: `${j.pedidoPor} (condenado no julgamento)` });
+        log(`Julgamento ${j.id}: ${j.nome} removido (${r.detalhe}).`);
+        // O banimento lembra do julgamento: a defesa já ouvida conta como contestação negada (contestar de novo só com argumento novo).
+        const ban = banAtivo(j.jid, j.fone);
+        if (ban) {
+          ban.julgamento = j.id;
+          const defesa = j.falas.filter((f) => f.papel !== 'quem pediu o ban').map((f) => `${f.por}: ${f.texto}`).join(' / ');
+          if (defesa) ban.contestacoes.push({ por: 'defesa no julgamento', motivo: defesa.slice(0, 500), aceita: false, em: Date.now() });
+          salvarBans();
+        }
+        const volta = ban ? ` Volta às ${horaBR(voltaDoBan(ban))}.` : '';
+        await enviar([`${/^condenad/i.test(frase) ? frase : `Condenado: ${j.nome} sai.`}${volta}`, r.resumoParcial].filter(Boolean).join('\n'));
+      } catch (e) {
+        if (voltaId) cancelarAgendada(voltaId);
+        log(`Julgamento ${j.id}: condenado, mas não deu para remover ${j.nome} (${e.message}).`);
+        await enviar(`Condenado, mas não consegui remover ${j.nome}: ${e.message}.`);
+      }
+    } finally {
+      decidindo.delete(j.id);
+    }
+  }
+  conferirJulgamentos = async () => {
+    if (!conectado) return;
+    for (const j of julgAbertos()) {
+      if (Date.now() < j.prazo || decidindo.has(j.id)) continue;
+      await darVeredito(j).catch((e) => log(`Julgamento ${j.id}: erro no veredito (${e.message}).`));
+    }
+  };
+
   // ---------- mensagens no PRIVADO do bot ----------
   // O bot só ouvia grupos (o messages.upsert pulava o que não era grupo), então quem mandava no privado
   // (ex: alguém banido querendo voltar) ficava sem resposta. Agora toda mensagem de gente no privado tem
@@ -1656,19 +1903,48 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
 
     const ban = await banDoPrivado([chat, m.key.remoteJidAlt].filter(Boolean));
     const grupo = ban ? await nomeDoGrupo(ban.jid) : '';
+    // Julgamentos abertos em que a pessoa pode falar: é o julgado, ou está no grupo do julgamento.
+    const idsAutor = new Set();
+    for (const i of [chat, m.key.remoteJidAlt].filter(Boolean)) for (const x of await idsDaPessoa(i, null)) idsAutor.add(digitos(x));
+    const julgs = [];
+    for (const j of julgAbertos()) {
+      const papel = papelNoJulgamento(j, [...idsAutor]);
+      const membro = papel !== 'outro membro' || ((await metadadosGrupo(j.jid).catch(() => null))?.participants || [])
+        .some((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => idsAutor.has(digitos(jidNormalizedUser(i)))));
+      if (membro) julgs.push({ j, papel, grupo: await nomeDoGrupo(j.jid) });
+    }
+    const julgado = julgs.find((x) => x.papel === 'julgado');
+    const julgamentosTxt = julgs.map(({ j, papel, grupo: g }) => `${j.id} | ${g} | ${j.nome} | ${j.pedidoPor} | veredito às ${horaBR(j.prazo)} | ${papel}`).join('\n');
     const conversa = (conversasPrivadas.get(chat) || []).slice(0, -1).map((x) => `[${horaBR(x.em)}] ${x.quem}: ${x.texto}`);
-    log(`Privado de ${autor}${ban ? ` (banido: ${ban.id}, volta às ${horaBR(voltaDoBan(ban))})` : ''}: "${texto.slice(0, 80)}"`);
+    log(`Privado de ${autor}${ban ? ` (banido: ${ban.id}, volta às ${horaBR(voltaDoBan(ban))})` : ''}${julgado ? ` (em julgamento: ${julgado.j.id})` : ''}: "${texto.slice(0, 80)}"`);
     await sock.sendPresenceUpdate('composing', chat).catch(() => {});
     let v;
     try {
       if (!ia) throw new Error('claude CLI não encontrado');
-      v = await naFilaDoClaude(() => responderNoPrivado({ autor: ban?.nome || autor, mensagem: texto, conversa, banimento: ban ? banParaPrompt(ban) : '', grupo }));
+      v = await naFilaDoClaude(() => responderNoPrivado({ autor: ban?.nome || julgado?.j.nome || autor, mensagem: texto, conversa, banimento: ban ? banParaPrompt(ban) : '', grupo, julgamentos: julgamentosTxt }));
     } catch (e) {
       log(`Privado de ${autor}: o Claude não respondeu (${e.message}).`);
-      v = { responder: true, texto: ban ? avisoDeBan(ban, grupo) : 'Deu ruim aqui pra responder agora, tenta de novo daqui a pouco.', contestacao: { fazer: false } };
+      // O julgado não perde a defesa por falha do Claude: a mensagem vai inteira como argumento.
+      v = julgado
+        ? { responder: true, texto: '', contestacao: { fazer: false }, defesa: { fazer: true, julgamento_id: julgado.j.id, argumento: texto, defensor: '' } }
+        : { responder: true, texto: ban ? avisoDeBan(ban, grupo) : 'Deu ruim aqui pra responder agora, tenta de novo daqui a pouco.', contestacao: { fazer: false } };
     }
-    if (!ban && v.responder === false) { log(`Privado de ${autor}: não respondi (spam/automática).`); return; }
+    if (!ban && !julgado && v.responder === false) { log(`Privado de ${autor}: não respondi (spam/automática).`); return; }
     let resposta = String(v.texto || '').trim() || (ban ? avisoDeBan(ban, grupo) : '');
+
+    // Defesa (ou acusação) num julgamento aberto, mandada no privado: anota e, se pediu defensor, chama no grupo.
+    if (v.defesa?.fazer && julgs.length) {
+      try {
+        const r = await falarNoJulgamento(v.defesa, { idsAutor: [...idsAutor], autor: julgado?.j.nome || autor, onde: 'privado' });
+        if (r.texto) resposta = r.texto;
+        if (r.avisoGrupo) {
+          guardarEnviada(await sock.sendMessage(r.j.jid, { text: marcaServico('Julgamento', r.avisoGrupo), mentions: mencoesDoTexto(r.avisoGrupo, await metadadosGrupo(r.j.jid).catch(() => null)) }));
+          resposta = [resposta, `Chamei ${r.j.defensor.nome} no grupo pra te defender (até as ${horaBR(r.j.prazo)}).`].filter(Boolean).join('\n');
+        }
+      } catch (e) {
+        log(`Julgamento: fala de ${autor} no privado não deu (${e.message}).`);
+      }
+    }
 
     // Contestação pelo próprio banido: mesmo julgamento do grupo; se aceitar, volta na hora e o grupo fica sabendo.
     if (ban && v.contestacao?.fazer) {
@@ -2163,6 +2439,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       const enviar = async (texto) => guardarEnviada(await sock.sendMessage(a.jid, { text: marcaServico('Agendado', texto), mentions: mencoesDoTexto(texto, await metadadosGrupo(a.jid).catch(() => null)) }));
       try {
         let texto = a.mensagem || '';
+        // Remoção agendada por quem não é o dono do bot: na hora marcada abre o julgamento (não remove direto).
+        if (a.admin?.acao === 'remover' && !a.semJulgamento) {
+          const r = await abrirJulgamentos(a.admin, { jid: a.jid, pedidoPor: a.pedidoPor, pedidoPorIds: a.pedidoPorIds || [], pedido: `${a.pedidoPor} agendou: ${a.descricao}${a.mensagem ? ` ("${a.mensagem.slice(0, 200)}")` : ''}` });
+          log(`Agendado (de ${a.pedidoPor}): remoção virou julgamento.`);
+          const aviso = [texto, r.texto].filter(Boolean).join('\n');
+          guardarEnviada(await sock.sendMessage(a.jid, { text: marcaServico('Julgamento', aviso), mentions: mencoesDoTexto(aviso, await metadadosGrupo(a.jid).catch(() => null)) }));
+          continue;
+        }
         if (a.admin) {
           const r = await executarAdmin(a.admin, { jid: a.jid, ctx: null, imagens: [], outrosMarcados: [], pedidoPor: a.pedidoPor });
           log(`Agendado (de ${a.pedidoPor}): ${a.admin.acao} feito (${r.detalhe}).`);

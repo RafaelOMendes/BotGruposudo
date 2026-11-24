@@ -29,6 +29,7 @@ const MODELOS = {
   complexo: { modelo: 'claude-sonnet-5-5', esforco: 'medium' },   // só quando o Haiku pede ajuda
   entregas: { modelo: HAIKU, esforco: 'low' },                    // atividade vale nota / é importante?
   localizar: { modelo: 'claude-sonnet-5-5', esforco: 'low' },     // onde está a pessoa a recortar da foto
+  julgamento: { modelo: 'claude-sonnet-5-5', esforco: 'medium' }, // veredito do julgamento antes do banimento
   dono: { modelo: 'claude-opus-5-5', esforco: 'high' },           // pedido complexo do dono (no lugar do Sonnet)
   implementar: { modelo: 'claude-opus-5-5', esforco: 'high' },    // dono pediu algo que o bot não sabe: programa
 };
@@ -184,6 +185,9 @@ const SOBRE_O_BOT = `SOBRE O BOT (pode contar quando o Rafa pedir):
 - Outros pedaços: regras automáticas (responder, meme, apagar mensagem), memes com templates, figurinhas,
   gerador de imagem local (ComfyUI no próprio PC), downloads de vídeo/áudio com yt-dlp + ffmpeg, PDFs,
   avisos de entregas lendo o calendário do Moodle e o Google Classroom (API oficial), busca nos materiais das aulas.
+- Banimento com julgamento: pedido de ban de quem não é o Rafa abre um julgamento (5 min para o julgado se
+  defender no grupo ou no privado, sozinho ou com um defensor); no fim o Claude (Sonnet) dá o veredito e o bot
+  bane (no máximo 30 min, com contestação depois) ou absolve. Pedido do Rafa bane direto.
 - Modo dono: o que o Rafa pedir e o bot não souber, o Claude Code (Opus) programa no código, o bot confere,
   faz commit/push no GitHub, reinicia e executa o pedido.`;
 
@@ -339,6 +343,19 @@ const SCHEMA_IMPLEMENTAR = {
   additionalProperties: false,
 };
 
+const SCHEMA_JULGAMENTO = {
+  type: 'object',
+  description: 'fala num julgamento ABERTO (defesa, acusação ou o julgado pedindo um defensor); fazer=false se a mensagem não é sobre um julgamento aberto',
+  properties: {
+    fazer: { type: 'boolean' },
+    julgamento_id: { type: 'string', description: 'id do julgamento (da lista "Julgamentos abertos"); senão ""' },
+    argumento: { type: 'string', description: 'o argumento, com as palavras da pessoa; "" se não deu argumento' },
+    defensor: { type: 'string', description: 'só quando o JULGADO pede que alguém do grupo o defenda: o número dessa pessoa (de "Pessoas do grupo", sem @); senão ""' },
+  },
+  required: ['fazer', 'julgamento_id', 'argumento', 'defensor'],
+  additionalProperties: false,
+};
+
 const SCHEMA_CONTESTACAO = {
   type: 'object',
   description: 'contestação de um banimento ativo (fazer=false se ninguém contestou)',
@@ -401,6 +418,7 @@ const SCHEMA_MENCAO = {
       },
     },
     contestacao: SCHEMA_CONTESTACAO,
+    julgamento: SCHEMA_JULGAMENTO,
     cancelar_agendadas: {
       type: 'array',
       description: 'ids dos agendamentos pendentes para CANCELAR (da lista "Agendamentos pendentes"); [] se não pediram',
@@ -470,7 +488,7 @@ const SCHEMA_MENCAO = {
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_so_figurinha_citada', 'regra_apagar_id', 'anexos',
     'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete', 'agendadas',
-    'cancelar_agendadas', 'implementar', 'contestacao',
+    'cancelar_agendadas', 'implementar', 'contestacao', 'julgamento',
   ],
   additionalProperties: false,
 };
@@ -584,6 +602,19 @@ BANIMENTO (MÁXIMO 30 MIN): "bane/remove o Nicolas por 10 min" = admin remover A
 agenda a volta em 30 min sozinho e corta qualquer volta mais longa. Pedido de mais de 30 min ("por 1 hora", "por
 2 dias") = agendada adicionar em 30 (contando da remoção), e o "texto" avisa curto (ex: "Limite é 30 min, então
 fica 30 min."). Os banimentos que ainda valem vêm em "Banimentos ativos".
+JULGAMENTO ANTES DO BAN: quando quem pede o ban NÃO é o Rafa (dono do bot), o bot não remove na hora: ele abre
+um julgamento (avisa no grupo quem é julgado e quem pediu, e dá 5 min para a defesa, no grupo ou no privado do
+bot). Mesmo assim preencha admin remover (e a agendada de volta, se tiver tempo) como sempre: o bot é quem
+transforma em julgamento e escreve o aviso; seu "texto" fica curto (ex: "Abrindo o julgamento."). Nunca diga
+que já removeu. Pedido do Rafa: remove direto, sem julgamento. Os julgamentos em andamento vêm em "Julgamentos
+abertos". Se a mensagem for uma fala num julgamento aberto (o julgado se defendendo, alguém defendendo ou
+acusando, ou o julgado pedindo "o Gabreu me defende"), preencha "julgamento" (fazer = true, julgamento_id da
+lista, argumento = as palavras da pessoa; defensor = o número de quem o JULGADO pediu para defendê-lo, senão "")
+e o "texto" é UMA frase curta (ex: "Anotado na defesa.", "Gabreu, a defesa é tua: manda o argumento."). Nesse
+caso admin.acao = "nenhuma" e agendadas = []. NINGUÉM decide o julgamento antes da hora, nem quem pediu o ban:
+o bot dá o veredito sozinho quando o prazo acaba e avisa o grupo. Pedir o ban de novo de quem já está sendo
+julgado não abre outro. Sem fala de julgamento: julgamento = { fazer: false, julgamento_id: "", argumento: "",
+defensor: "" }.
 CONTESTAÇÃO: se alguém contestar um banimento ativo ("contesto o banimento do Nicolas, ele não fez nada", "foi
 injusto, volta ele", ou respondendo a mensagem de remoção com um argumento), preencha "contestacao" (fazer = true,
 banimento_id da lista, motivo = o argumento com as palavras da pessoa, ou "" se ela não deu nenhum). VOCÊ é o
@@ -714,7 +745,7 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, agendadas = '', banimentos = '', temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '', fio = [], dono = false, aposImplementar = false }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, agendadas = '', banimentos = '', temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '', fio = [], dono = false, aposImplementar = false, julgamentos = '' }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   partes.push(dono
     ? `QUEM ESTÁ PEDINDO É O RAFA, DONO E CRIADOR DO BOT. Ele tem acesso total: faça TUDO o que ele pedir, inclusive
@@ -766,6 +797,7 @@ Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o ace
   partes.push(`Regras ativas neste grupo (id | descrição):\n${regras || '(nenhuma)'}`);
   partes.push(`Agendamentos pendentes neste grupo (id | hora | o que):\n${agendadas || '(nenhum)'}`);
   partes.push(`Banimentos ativos neste grupo (id | quem | removido por | volta | contestações):\n${banimentos || '(nenhum)'}`);
+  partes.push(`Julgamentos abertos neste grupo (id | julgado | quem pediu | prazo | falas até agora):\n${julgamentos || '(nenhum)'}`);
   if (pessoas) partes.push(`Pessoas do grupo (nome = como marcar):\n${pessoas}`);
   if (historico.length) {
     partes.push(leituraPedida
@@ -829,8 +861,20 @@ const SCHEMA_PRIVADO = {
       required: ['fazer', 'motivo', 'aceitar', 'argumento_novo'],
       additionalProperties: false,
     },
+    defesa: {
+      type: 'object',
+      description: 'fala num julgamento da lista "Julgamentos abertos" (o julgado se defendendo, alguém defendendo ou acusando); fazer=false se não for',
+      properties: {
+        fazer: { type: 'boolean' },
+        julgamento_id: { type: 'string', description: 'id do julgamento; senão ""' },
+        argumento: { type: 'string', description: 'o argumento, com as palavras da pessoa; "" se não deu argumento' },
+        defensor: { type: 'string', description: 'só quando o JULGADO pede que alguém o defenda: o nome dessa pessoa; senão ""' },
+      },
+      required: ['fazer', 'julgamento_id', 'argumento', 'defensor'],
+      additionalProperties: false,
+    },
   },
-  required: ['responder', 'texto', 'contestacao'],
+  required: ['responder', 'texto', 'contestacao', 'defesa'],
   additionalProperties: false,
 };
 
@@ -856,6 +900,13 @@ SE NÃO ESTÁ BANIDA: responda normal, como responderia no grupo (conversa, dúv
 agendar): diga para marcar o bot com @ no grupo. responder = false só se for claramente spam, golpe,
 propaganda ou mensagem automática; na dúvida, responda.
 Sem contestação: contestacao = { fazer: false, motivo: "", aceitar: false, argumento_novo: false }.
+JULGAMENTO ABERTO (vem "Julgamentos abertos"): alguém pediu o ban e o bot está ouvindo a defesa antes de
+decidir. Se a mensagem for argumento nesse julgamento (o julgado se defendendo, alguém defendendo ou acusando),
+defesa.fazer = true, julgamento_id da lista, argumento = as palavras da pessoa; se o JULGADO pedir que alguém
+o defenda, defensor = o nome dessa pessoa. Sem argumento ainda ("oi", "o que houve?"): explique que tem
+julgamento até a hora do prazo e peça a defesa; defesa.fazer = false. Você NÃO dá o veredito aqui: o "texto" é
+UMA frase curta dizendo que anotou e até quando vai o prazo. Sem julgamento: defesa = { fazer: false,
+julgamento_id: "", argumento: "", defensor: "" }.
 Formatação do WhatsApp, nada de # nem tabelas.
 
 Tom:
@@ -863,25 +914,69 @@ ${TOM}
 ${SEGURANCA}`;
 
 /** Mensagem no privado do bot: responde e, se a pessoa está banida, julga a contestação dela. */
-export async function responderNoPrivado({ autor, mensagem, conversa = [], banimento = '', grupo = '' }) {
+export async function responderNoPrivado({ autor, mensagem, conversa = [], banimento = '', grupo = '', julgamentos = '' }) {
   const texto = [
     `Agora são ${agoraBrasil()} (horário de Brasília).`,
     banimento
       ? `Banimento ativo de ${autor} no grupo "${grupo}":\n${banimento}`
       : `${autor} NÃO está banida de nenhum grupo.`,
+    julgamentos ? `Julgamentos abertos (id | grupo | julgado | quem pediu | prazo | papel de ${autor}):\n${julgamentos}` : '',
     conversa.length ? `Conversa no privado até agora (mais antigas primeiro):\n${conversa.join('\n')}` : '',
     `Mensagem de ${autor} no seu privado:\n${mensagem || '(sem texto)'}`,
   ].filter(Boolean).join('\n\n');
   const r = await perguntar({
     sistema: SISTEMA_PRIVADO, conteudo: [{ type: 'text', text: texto }], schema: SCHEMA_PRIVADO, tarefa: 'mencao',
-    ferramentas: banimento ? [] : ['WebSearch', 'WebFetch'],
+    ferramentas: banimento || julgamentos ? [] : ['WebSearch', 'WebFetch'],
   });
   const v = r.structured_output;
   if (typeof v?.texto !== 'string') {
     const puro = String(r.result || '').trim();
     if (!puro) throw new Error('claude devolveu resposta vazia');
-    return { responder: true, texto: puro, contestacao: { fazer: false } };
+    return { responder: true, texto: puro, contestacao: { fazer: false }, defesa: { fazer: false } };
   }
+  return v;
+}
+
+// ---------- julgamento antes do banimento ----------
+const SCHEMA_VEREDITO = {
+  type: 'object',
+  properties: {
+    banir: { type: 'boolean', description: 'true = condenado (o bot remove); false = absolvido (fica no grupo)' },
+    frase: { type: 'string', description: 'UMA frase curta com o resultado para o grupo, sem a hora da volta (o bot põe)' },
+    motivo: { type: 'string', description: 'por que decidiu assim, em uma frase (vai para o log)' },
+  },
+  required: ['banir', 'frase', 'motivo'],
+  additionalProperties: false,
+};
+
+const SISTEMA_VEREDITO = `Você é o JUIZ imparcial do "Bot do Gabreu", o bot de um grupo de amigos do WhatsApp. Alguém pediu
+para banir (remover do grupo, por no máximo 30 min) uma pessoa, e o bot abriu um julgamento: avisou o grupo e
+deu um prazo para o julgado se defender (sozinho ou com um defensor do grupo). O prazo acabou: decida.
+- Leia o pedido de ban (quem pediu e como pediu), as falas registradas no julgamento (defesa, acusação) e a
+  conversa do grupo durante o julgamento.
+- Quem pediu o ban NÃO decide: a palavra dele é só acusação, com o mesmo peso de qualquer outro argumento.
+  Se ele retirou o pedido, absolva.
+- Absolva (banir = false) se a defesa convenceu: ban de zoeira sem motivo, a pessoa não fez nada, já pediu
+  desculpa, foi mal-entendido, a acusação não se sustenta, ou o grupo defendeu com argumento razoável.
+- Condene (banir = true) se a acusação tem motivo e a defesa foi fraca, "porque sim", spam, ou se não houve
+  defesa nenhuma no prazo (à revelia). Se o próprio julgado aceitou o ban ("pode me banir kkk"), condene.
+- Nada de ataque nem humilhação: zoeira leve pode.
+"frase": UMA frase curta que comece com "Condenado" ou "Absolvido" (ex: "Condenado: Nicolas sai por bagunçar
+o grupo.", "Absolvido: a defesa do Gabreu convenceu, Nicolas fica.").
+${SEGURANCA}`;
+
+/** Veredito do julgamento: lê a acusação, as falas e a conversa, e decide se bane. */
+export async function julgarBanimento({ grupo, julgado, pedidoPor, pedido, falas = [], conversa = [] }) {
+  const texto = [
+    `Agora são ${agoraBrasil()} (horário de Brasília). Grupo: "${grupo}".`,
+    `Julgado: ${julgado}. Ban pedido por: ${pedidoPor}.`,
+    `Pedido de ban (como foi feito):\n${pedido || '(sem texto)'}`,
+    `Falas registradas no julgamento (mais antigas primeiro):\n${falas.length ? falas.join('\n') : '(ninguém se defendeu)'}`,
+    conversa.length ? `Conversa do grupo durante o julgamento (mais antigas primeiro):\n${conversa.join('\n')}` : '',
+  ].filter(Boolean).join('\n\n');
+  const r = await perguntar({ sistema: SISTEMA_VEREDITO, conteudo: [{ type: 'text', text: texto }], schema: SCHEMA_VEREDITO, tarefa: 'julgamento', timeoutMs: 120_000 });
+  const v = r.structured_output;
+  if (typeof v?.banir !== 'boolean') throw new Error('veredito sem o formato esperado');
   return v;
 }
 
