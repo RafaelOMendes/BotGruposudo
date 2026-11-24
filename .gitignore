@@ -20,6 +20,7 @@ cookies.txt
 .enquetes.json
 .agendadas.json
 .saidas.json
+.banimentos.json
 calendarios/
 .pendente-dono.json
 .periodos-fora.json

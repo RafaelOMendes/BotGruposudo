@@ -601,6 +601,7 @@ async function iniciar() {
       for (const p of u.participants || []) {
         const ids = (typeof p === 'string' ? [p] : [p.id, p.phoneNumber, p.lid]).filter(Boolean);
         marcarVolta(u.id, ids);
+        encerrarBanimento(u.id, ids.map((i) => digitos(jidNormalizedUser(i))), 'voltou', true);
         // "Histórico na volta" ligado no grupo: quem tinha saído recebe sozinho o que perdeu. Espera um
         // pouco para o "adicionar com mandar_historico" do próprio bot marcar que já vai mandar.
         if (historicoNaVolta[u.id] && !ids.some((i) => meusIds().includes(jidNormalizedUser(i)))) {
@@ -892,6 +893,7 @@ async function iniciar() {
         materiais,
         grupo: meta.subject, historico: hist, leituraPedida, autor, pedido, citada, imagens, regras: regras.resumo(jid), fio,
         agendadas: agendadasParaPrompt(jid),
+        banimentos: banimentosParaPrompt(jid),
         animacao: animado ? (animado.ext === 'webp' ? 'uma figurinha animada' : animado.gif ? 'um GIF' : 'um vídeo') : '',
         temVideo: temDownloaderDeVideo(), respondeuBot, catalogo: await catalogoParaPrompt(), temGerador: !!geradorOk && temGerador(),
         pessoas: pessoasParaPrompt(jid, meta),
@@ -941,14 +943,29 @@ async function iniciar() {
           else resposta = `Não achei a regra "${v.regra_apagar_id}".`;
         }
 
-        // Função de admin (remover, adicionar, promover, nome, link...): só confirma depois de conseguir.
-        if (v.acao === 'responder' && v.admin?.acao && v.admin.acao !== 'nenhuma') {
+        // Contestação de banimento: o bot confere quem contesta; se o Claude aceitou, a pessoa volta na hora.
+        if (v.acao === 'responder' && v.contestacao?.fazer) {
           try {
-            const r = await executarAdmin(v.admin, { jid, ctx, imagens, outrosMarcados });
+            const r = await contestarBanimento(v.contestacao, { jid, m, autor, texto: v.texto });
+            resposta = r.texto;
+            if (!r.pergunta) servico = 'Contestação';
+          } catch (e) {
+            log(`Contestação de ${autor} não deu (${e.message}).`);
+            resposta = `Não consegui: ${e.message}.`;
+          }
+        }
+
+        // Função de admin (remover, adicionar, promover, nome, link...): só confirma depois de conseguir.
+        // (Na contestação quem adiciona é ela: não executa um "adicionar" repetido.)
+        if (v.acao === 'responder' && v.admin?.acao && v.admin.acao !== 'nenhuma' && !v.contestacao?.fazer) {
+          try {
+            const r = await executarAdmin(v.admin, { jid, ctx, imagens, outrosMarcados, pedidoPor: autor });
             log(`Admin: ${v.admin.acao}${v.admin.pessoas?.length ? ` (${v.admin.pessoas.join(', ')})` : ''} pedido por ${autor}: feito (${r.detalhe}).`);
             servico = 'Admin';
             // Quando o bot tem o resumo com os números (histórico), ele basta: sem o texto do Claude junto.
             resposta = [r.resumoParcial || (r.extra ? '' : resposta), r.parcial, r.extra].filter(Boolean).join('\n');
+            // Volta automática do banimento (30 min): avisa, se o pedido não tinha a volta com tempo.
+            if (r.aviso && !(v.agendadas || []).some((x) => x.admin?.acao === 'adicionar')) resposta = [resposta, r.aviso].filter(Boolean).join('\n');
           } catch (e) {
             log(`Admin: ${v.admin.acao} pedido por ${autor} não deu (${e.message}).`);
             resposta = `Não consegui: ${e.message}.`;
@@ -960,6 +977,13 @@ async function iniciar() {
           const canceladas = [];
           for (const id of v.cancelar_agendadas.slice(0, 10)) {
             const a = pendentes(jid).find((p) => p.id === String(id).trim());
+            // A volta de um banimento fica: ninguém passa de 30 min fora (para trazer antes, só contestando).
+            const ban = a && banimentos.find((b) => b.ativo && b.agendaId === a.id);
+            if (ban) {
+              log(`Cancelar agendado ${a.id} (pedido de ${autor}): é a volta do banimento de ${ban.nome}; fica.`);
+              resposta = [resposta, `A volta de ${ban.nome} não cancela: o máximo fora é ${BAN_MAX_MIN} min.`].filter(Boolean).join('\n');
+              continue;
+            }
             if (!a || !cancelarAgendada(a.id)) { log(`Cancelar agendado ${id} (pedido de ${autor}): não achei.`); continue; }
             canceladas.push(`${a.descricao} das ${horaBR(a.quando)}`);
             log(`Agendado ${a.id} cancelado por ${autor}: ${a.descricao} das ${horaBR(a.quando)}${a.mensagem ? ` (mensagem "${a.mensagem.slice(0, 60)}")` : ''}.`);
@@ -974,10 +998,40 @@ async function iniciar() {
         if (v.acao === 'responder' && Array.isArray(v.agendadas) && v.agendadas.length) {
           const meta2 = await metadadosGrupo(jid).catch(() => meta);
           const feitas = [];
+          // Banimento: a volta é no máximo 30 min depois da remoção (agora, ou a remoção agendada neste pedido).
+          const removeEm = new Map();
           for (const a of v.agendadas.slice(0, 5)) {
-            const minutos = Math.min(7 * 24 * 60, Math.max(0.25, Number(a.minutos) || 0));
+            if (a.admin?.acao === 'remover') for (const f of await fonesDe(a.admin.pessoas, meta2)) removeEm.set(f, Math.max(0.25, Number(a.minutos) || 0));
+          }
+          let passouDoLimite = false;
+          for (const a of v.agendadas.slice(0, 5)) {
+            let minutos = Math.min(7 * 24 * 60, Math.max(0.25, Number(a.minutos) || 0));
             const admin = a.admin?.acao && a.admin.acao !== 'nenhuma' ? a.admin : null;
             if (!admin && !a.mensagem?.trim()) continue;
+            if (admin?.acao === 'adicionar') {
+              const fonesDaVolta = await fonesDe(admin.pessoas, meta2);
+              const ban = fonesDaVolta.map((f) => banAtivo(jid, f)).find(Boolean);
+              const removidoEm = ban ? (ban.em - Date.now()) / 60e3 : fonesDaVolta.map((f) => removeEm.get(f)).find((x) => x != null);
+              if (removidoEm != null && minutos > removidoEm + BAN_MAX_MIN + 0.5) {
+                minutos = Math.max(0.25, removidoEm + BAN_MAX_MIN);
+                passouDoLimite = true;
+              }
+              // A volta automática do banimento já está na agenda: só muda a hora (e junta o histórico), sem criar outra.
+              const volta = ban && pendentes(jid).find((p) => p.id === ban.agendaId);
+              if (volta) {
+                volta.quando = Date.now() + minutos * 60e3;
+                volta.pedidoPor = autor;
+                if (admin.mandar_historico) {
+                  Object.assign(volta.admin, { mandar_historico: true, historico_completo: !!(admin.historico_completo || volta.admin.historico_completo), texto: admin.texto || volta.admin.texto });
+                }
+                salvarAgenda();
+                ban.volta = volta.quando;
+                salvarBans();
+                feitas.push(`${volta.descricao} às ${horaBR(volta.quando)}${admin.mandar_historico ? ' (com o histórico)' : ''}`);
+                log(`Agendado por ${autor}: volta do banimento ${ban.id} (${ban.nome}) às ${horaBR(volta.quando)} (em ${minutos.toFixed(1)} min).`);
+                continue;
+              }
+            }
             // Mesma ação para a mesma pessoa já agendada perto dessa hora (ex: duas pessoas pediram, ou
             // "quando ele voltar manda o histórico"): não repete; se o novo pede o histórico, junta no que já tem.
             // A pessoa pode vir pelo LID num pedido e pelo número no outro: compara pelo telefone.
@@ -1011,6 +1065,7 @@ async function iniciar() {
             servico = servico ? `${servico} + Agendado` : 'Agendado';
             resposta = [resposta, `⏰ ${feitas.join('; ')}.`].filter(Boolean).join('\n');
           }
+          if (passouDoLimite && !/limite/i.test(resposta || '')) resposta = [resposta, `Limite é ${BAN_MAX_MIN} min, então fica ${BAN_MAX_MIN} min.`].filter(Boolean).join('\n');
         }
 
         // Enquete (com ação se aprovada, ex: expulsar se metade + 1 votar sim).
@@ -1394,6 +1449,140 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
 
   const marcarVolta = (jid, ids) => marcarSaida(jid, ids, '|volta');
 
+  // ---------- banimentos (remoções do bot) e contestação ----------
+  // Cada remoção feita pelo bot vira um banimento em .banimentos.json ({ id, jid, fone, ids, nome, pedidoPor,
+  // em, volta, agendaId, ativo, contestacoes }). Ninguém fica fora mais que BAN_MAX_MIN: o bot agenda a volta.
+  const BAN_MAX_MIN = 30;
+  const ARQ_BANS = path.join(DIR, '.banimentos.json');
+  let banimentos = [];
+  try { banimentos = JSON.parse(fs.readFileSync(ARQ_BANS, 'utf8')); } catch { /* nenhum */ }
+  const salvarBans = () => {
+    while (banimentos.length > 300) banimentos.shift();
+    try { fs.writeFileSync(ARQ_BANS, JSON.stringify(banimentos, null, 1)); } catch { /* tenta na próxima */ }
+  };
+  const banAtivo = (jid, fone) => banimentos.find((b) => b.jid === jid && b.ativo && (b.fone === fone || b.ids.includes(fone)));
+  // Números das pessoas de uma ação (LID ou telefone → telefone), para achar a mesma pessoa.
+  const fonesDe = (lista, meta) => Promise.all((lista || []).map((n) => telefoneDe(n, meta)));
+  /** A pessoa voltou (ou foi removida de novo): o banimento acaba. Com cancelarVolta, tira a volta automática da agenda. */
+  function encerrarBanimento(jid, nums, como, cancelarVolta = false) {
+    let mudou = false;
+    for (const b of banimentos) {
+      if (b.jid !== jid || !b.ativo || !nums.some((n) => n && (n === b.fone || b.ids.includes(n)))) continue;
+      Object.assign(b, { ativo: false, fim: Date.now(), como });
+      // A volta que ia mandar o histórico continua (se já voltou pelo link, ela manda o PDF na hora marcada).
+      const volta = pendentes(jid).find((a) => a.id === b.agendaId);
+      if (cancelarVolta && volta && !volta.admin?.mandar_historico && (volta.admin?.pessoas || []).length <= 1) cancelarAgendada(volta.id);
+      log(`Banimento ${b.id} de ${b.nome} encerrado (${como}).`);
+      mudou = true;
+    }
+    if (mudou) salvarBans();
+  }
+  /** O bot removeu alguém: guarda o banimento e garante a volta em até 30 min. Devolve o aviso para o grupo (ou ''). */
+  async function registrarBanimento(jid, j, p, meta, pedidoPor) {
+    const ids = [...new Set([j, p?.id, p?.lid, p?.phoneNumber].filter(Boolean).map((i) => digitos(jidNormalizedUser(i))))];
+    const fone = p?.phoneNumber ? digitos(jidNormalizedUser(p.phoneNumber)) : await telefoneDe(digitos(jidNormalizedUser(j)), meta);
+    if (!ids.includes(fone)) ids.push(fone);
+    encerrarBanimento(jid, ids, 'removido de novo');
+    const nome = nomeDaPessoa(j, p?.id, p?.lid, p?.phoneNumber) || `+${fone}`;
+    const agora = Date.now();
+    const limite = agora + BAN_MAX_MIN * 60e3;
+    const ban = { id: crypto.randomBytes(3).toString('hex'), jid, fone, ids, nome, pedidoPor: pedidoPor || 'alguém', em: agora, volta: limite, agendaId: null, ativo: true, contestacoes: [] };
+    // Volta já agendada (ex: "remove daqui a 5 min e volta em 10"): usa ela, cortando em 30 min.
+    let volta = null;
+    for (const a of pendentes(jid)) {
+      if (a.admin?.acao === 'adicionar' && (await fonesDe(a.admin.pessoas, meta)).includes(fone)) { volta = a; break; }
+    }
+    let aviso = '';
+    if (volta) {
+      if (volta.quando > limite) {
+        volta.quando = limite;
+        salvarAgenda();
+        aviso = `Limite é ${BAN_MAX_MIN} min, então ${nome} volta às ${horaBR(limite)}.`;
+      }
+      Object.assign(ban, { agendaId: volta.id, volta: volta.quando });
+    } else {
+      ban.agendaId = agendar({
+        jid, quando: limite, mensagem: '', pedidoPor: `limite de ${BAN_MAX_MIN} min`, descricao: `adiciono ${nome}`,
+        admin: { acao: 'adicionar', pessoas: [fone], texto: '', tempo: '', mandar_historico: false, historico_completo: false, historico_desde: agora },
+      });
+      aviso = `⏰ ${nome} volta às ${horaBR(limite)} (máximo ${BAN_MAX_MIN} min fora).`;
+    }
+    banimentos.push(ban);
+    salvarBans();
+    log(`Banimento ${ban.id}: ${nome} (${fone}) removido a pedido de ${ban.pedidoPor}; volta às ${horaBR(ban.volta)}.`);
+    return aviso;
+  }
+  // Banimentos que ainda valem, para o Claude saber quem dá para contestar (e o que já foi contestado).
+  function banimentosParaPrompt(jid) {
+    return banimentos.filter((b) => b.jid === jid && b.ativo && Date.now() - b.em < 24 * 60 * 60e3).map((b) => {
+      const volta = pendentes(jid).find((a) => a.id === b.agendaId);
+      const cont = b.contestacoes.length
+        ? b.contestacoes.map((c) => `${c.por} contestou às ${horaBR(c.em)} ("${c.motivo.slice(0, 150)}"): ${c.aceita ? 'aceita' : 'NEGADA'}`).join('; ')
+        : 'sem contestação';
+      return `${b.id} | ${b.nome} = @${b.fone} | removido às ${horaBR(b.em)} a pedido de ${b.pedidoPor} | volta às ${horaBR(volta?.quando || b.volta)} | ${cont}`;
+    }).join('\n');
+  }
+  /**
+   * Contestação de banimento: confere quem contesta (tem que estar no grupo e não ser o banido) e, se o
+   * Claude aceitou o argumento, adiciona de volta na hora e tira a volta antiga da agenda. Devolve { texto, pergunta }.
+   */
+  async function contestarBanimento(c, { jid, m, autor, texto }) {
+    const ativos = banimentos.filter((b) => b.jid === jid && b.ativo);
+    const ban = ativos.find((b) => b.id === String(c.banimento_id || '').trim()) || (ativos.length === 1 ? ativos[0] : null);
+    if (!ban) return { texto: ativos.length ? 'Contestar o banimento de quem?' : 'Não tem banimento valendo pra contestar.', pergunta: true };
+    const meta = await sock.groupMetadata(jid); // na hora: quem está no grupo agora
+    const doAutor = [m.key.participant, m.key.participantAlt].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)));
+    const membro = (meta.participants || []).find((p) => [p.id, p.lid, p.phoneNumber].filter(Boolean).some((i) => doAutor.includes(digitos(jidNormalizedUser(i)))));
+    if (!membro) {
+      log(`Contestação do banimento ${ban.id} por ${autor} recusada: não está no grupo.`);
+      return { texto: 'Contestação não vale: só quem tá no grupo pode contestar.' };
+    }
+    const idsAutor = [...doAutor, ...[membro.id, membro.lid, membro.phoneNumber].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)))];
+    if (idsAutor.some((i) => i === ban.fone || ban.ids.includes(i))) return { texto: 'Não dá pra contestar o próprio banimento.' };
+    const motivo = String(c.motivo || '').trim();
+    if (!motivo) return { texto: texto?.trim() || `Qual o motivo da contestação do banimento de ${ban.nome}?`, pergunta: true };
+    // Uma contestação por banimento: depois de negada, só volta a julgar se trouxer argumento novo.
+    if (ban.contestacoes.some((x) => !x.aceita) && !c.argumento_novo) {
+      log(`Contestação do banimento ${ban.id} por ${autor} ignorada: já foi negada e não trouxe argumento novo.`);
+      return { texto: 'Esse banimento já foi contestado e negado; só com argumento novo.' };
+    }
+    const registro = { por: autor, motivo: motivo.slice(0, 500), aceita: !!c.aceitar, em: Date.now() };
+    ban.contestacoes.push(registro);
+    salvarBans();
+    log(`Contestação do banimento ${ban.id} (${ban.nome}) por ${autor}: ${registro.aceita ? 'aceita' : 'negada'} ("${registro.motivo.slice(0, 80)}").`);
+    if (!registro.aceita) return { texto: texto?.trim() || 'Contestação negada, fica o tempo que tá.' };
+
+    // Aceita: as voltas agendadas dessa pessoa (se alguma ia mandar o histórico, a volta de agora manda).
+    const voltas = [];
+    for (const a of pendentes(jid)) {
+      if (a.admin?.acao === 'adicionar' && (a.id === ban.agendaId || (await fonesDe(a.admin.pessoas, meta)).includes(ban.fone))) voltas.push(a);
+    }
+    const comHistorico = voltas.find((a) => a.admin.mandar_historico)?.admin;
+    let r;
+    try {
+      r = await executarAdmin({
+        acao: 'adicionar', pessoas: [ban.fone], texto: comHistorico?.texto || '', tempo: '',
+        mandar_historico: !!comHistorico, historico_completo: !!comHistorico?.historico_completo, historico_desde: comHistorico?.historico_desde || ban.em,
+      }, { jid, ctx: null, imagens: [], outrosMarcados: [], pedidoPor: autor });
+    } catch (e) {
+      log(`Contestação aceita, mas não deu para adicionar ${ban.nome} (${e.message}).`);
+      return { texto: `Contestação aceita, mas não consegui adicionar ${ban.nome}: ${e.message}.` };
+    }
+    // Para não adicionar duas vezes: tira a pessoa das voltas agendadas (a agendada só some se era só ela).
+    for (const a of voltas) {
+      const resto = [];
+      for (const n of a.admin.pessoas || []) if (await telefoneDe(n, meta) !== ban.fone) resto.push(n);
+      if (resto.length) {
+        a.admin.pessoas = resto;
+        a.descricao = descreverAcao(a.admin, meta);
+        salvarAgenda();
+      } else cancelarAgendada(a.id);
+      log(`Contestação aceita: volta agendada ${a.id} das ${horaBR(a.quando)} ${resto.length ? 'sem ' + ban.nome : 'cancelada'}.`);
+    }
+    if (!r.parcial) encerrarBanimento(jid, [ban.fone, ...ban.ids], 'contestação aceita');
+    return { texto: [r.resumoParcial || texto?.trim() || `Contestação aceita, ${ban.nome} de volta.`, r.parcial].filter(Boolean).join('\n') };
+  }
+
   async function mandarHistorico(jid, destino, desde, meta, ate = 0, saiuEm = 0) {
     // As mensagens guardadas têm a hora em SEGUNDOS (messageTimestamp); saídas e pedidos, em ms.
     const saiu = saiuEm || saidas[`${jid}|${digitos(destino)}`];
@@ -1561,7 +1750,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
    * Executa a função de admin que o Claude pediu. Devolve { ok, detalhe }; lança erro com a explicação
    * se não deu (o bot não é admin, pessoa não achada...).
    */
-  async function executarAdmin(a, { jid, ctx, imagens, outrosMarcados }) {
+  async function executarAdmin(a, { jid, ctx, imagens, outrosMarcados, pedidoPor = '' }) {
     if (a.acao === 'apagar_repetidos_do_bot') return apagarRepetidosDoBot(jid); // as do bot: não precisa ser admin
     // Histórico automático para quem volta: só manda PDF no privado, não precisa ser admin.
     if (a.acao === 'historico_na_volta_ligar') {
@@ -1621,13 +1810,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       const deram = alvos.filter((j) => !falhas.some((x) => mesmo(x, j)));
       // Para dizer o nome de quem não deu: o alvo correspondente (é o id que se conhece).
       for (const x of falhas) x.alvo = alvos.find((j) => mesmo(x, j)) || x.jid;
+      // Removido pelo bot = banimento (com a volta garantida em até 30 min); voltou = o banimento acaba.
+      const avisos = [];
       if (a.acao === 'remover') {
         for (const j of deram) {
           const p = participante(digitos(jidNormalizedUser(j)));
           marcarSaida(jid, [j, p?.lid, p?.phoneNumber, p?.id]);
+          try { avisos.push(await registrarBanimento(jid, j, p, meta, pedidoPor)); } catch (e) { log(`Banimento: não deu para registrar ${j} (${e.message}).`); }
         }
       }
       if (a.acao === 'adicionar') for (const j of deram) marcarVolta(jid, [j]);
+      if (a.acao === 'adicionar') {
+        const voltaram = [...deram, ...falhas.filter((x) => String(x.status) === '409').map((x) => x.alvo)];
+        if (voltaram.length) encerrarBanimento(jid, voltaram.flatMap((j) => [digitos(j), numAlvo.get(j)]), 'voltou', true);
+      }
       if (a.acao === 'adicionar' && a.mandar_historico) {
         // Quem "já está no grupo" (voltou pelo link antes da hora) também recebe o histórico pedido.
         const jaDentro = falhas.filter((x) => String(x.status) === '409').map((x) => x.alvo);
@@ -1681,7 +1877,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       const resumoParcial = falhas.length
         ? `${verbo}: ${deram.map(nomeDoAlvo).join(', ')}.\nNão deu: ${falhas.map((x) => `${nomeDoAlvo(x.alvo)} (${motivo(x.status)})`).join(', ')}.`
         : '';
-      return { detalhe: `${a.acao} ${alvos.length - falhas.length}/${alvos.length}`, resumoParcial };
+      return { detalhe: `${a.acao} ${alvos.length - falhas.length}/${alvos.length}`, resumoParcial, aviso: avisos.filter(Boolean).join('\n') };
     }
     if (a.acao === 'mandar_historico') {
       // Só manda o histórico no privado (a pessoa já está no grupo): da última saída até a volta.
@@ -1831,9 +2027,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     }
     try {
       const oque = descreverAcao(e.acao, await metadadosGrupo(e.jid).catch(() => null)); // antes: a pessoa ainda está no grupo
-      const r = await executarAdmin(e.acao, { jid: e.jid, ctx: null, imagens: [], outrosMarcados: [] });
+      const r = await executarAdmin(e.acao, { jid: e.jid, ctx: null, imagens: [], outrosMarcados: [], pedidoPor: `enquete "${e.pergunta}"` });
       log(`Enquete "${e.pergunta}" aprovada (${placar}): ${e.acao.acao} feito (${r.detalhe}).`);
-      await enviar([`Enquete aprovada (${aFavor} votos em "${e.opcaoAprova}"). Como combinado, ${oque}: feito.`, r.resumoParcial, r.parcial, r.extra].filter(Boolean).join('\n'));
+      await enviar([`Enquete aprovada (${aFavor} votos em "${e.opcaoAprova}"). Como combinado, ${oque}: feito.`, r.resumoParcial, r.parcial, r.extra, r.aviso].filter(Boolean).join('\n'));
     } catch (err) {
       log(`Enquete "${e.pergunta}" aprovada, mas a ação falhou (${err.message}).`);
       await enviar(`Enquete aprovada, mas não consegui: ${err.message}.`);
@@ -1858,9 +2054,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       try {
         let texto = a.mensagem || '';
         if (a.admin) {
-          const r = await executarAdmin(a.admin, { jid: a.jid, ctx: null, imagens: [], outrosMarcados: [] });
+          const r = await executarAdmin(a.admin, { jid: a.jid, ctx: null, imagens: [], outrosMarcados: [], pedidoPor: a.pedidoPor });
           log(`Agendado (de ${a.pedidoPor}): ${a.admin.acao} feito (${r.detalhe}).`);
-          texto = [texto || (r.resumoParcial ? 'Na hora marcada:' : `Na hora marcada: ${a.descricao}: feito.`), r.resumoParcial, r.parcial, r.extra].filter(Boolean).join('\n');
+          texto = [texto || (r.resumoParcial ? 'Na hora marcada:' : `Na hora marcada: ${a.descricao}: feito.`), r.resumoParcial, r.parcial, r.extra, r.aviso].filter(Boolean).join('\n');
         } else log(`Agendado (de ${a.pedidoPor}): mensagem enviada.`);
         await enviar(texto);
       } catch (e) {

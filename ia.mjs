@@ -339,6 +339,20 @@ const SCHEMA_IMPLEMENTAR = {
   additionalProperties: false,
 };
 
+const SCHEMA_CONTESTACAO = {
+  type: 'object',
+  description: 'contestação de um banimento ativo (fazer=false se ninguém contestou)',
+  properties: {
+    fazer: { type: 'boolean' },
+    banimento_id: { type: 'string', description: 'id do banimento contestado (da lista "Banimentos ativos"); senão ""' },
+    motivo: { type: 'string', description: 'o argumento de quem contesta, com as palavras dela; "" se não deu motivo' },
+    aceitar: { type: 'boolean', description: 'true = o argumento convenceu e a pessoa volta pro grupo agora; false = fica o tempo que falta (ou não deu motivo)' },
+    argumento_novo: { type: 'boolean', description: 'banimento com contestação já negada: true só se o motivo traz algo realmente novo; senão false' },
+  },
+  required: ['fazer', 'banimento_id', 'motivo', 'aceitar', 'argumento_novo'],
+  additionalProperties: false,
+};
+
 const SCHEMA_MENCAO = {
   type: 'object',
   properties: {
@@ -386,6 +400,7 @@ const SCHEMA_MENCAO = {
         additionalProperties: false,
       },
     },
+    contestacao: SCHEMA_CONTESTACAO,
     cancelar_agendadas: {
       type: 'array',
       description: 'ids dos agendamentos pendentes para CANCELAR (da lista "Agendamentos pendentes"); [] se não pediram',
@@ -455,7 +470,7 @@ const SCHEMA_MENCAO = {
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
     'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_so_figurinha_citada', 'regra_apagar_id', 'anexos',
     'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete', 'agendadas',
-    'cancelar_agendadas', 'implementar',
+    'cancelar_agendadas', 'implementar', 'contestacao',
   ],
   additionalProperties: false,
 };
@@ -562,7 +577,26 @@ o que). "Cancela o aviso das 18h", "não adiciona mais ele", "desmarca" = cancel
 Corrigir um agendado ("a lição é pro Nicolas, não pro Bernardo", "muda pra 19h") = cancelar o antigo +
 nova agendada com o certo, no mesmo horário se não disseram outro. Não cancele nem recrie o que não mudou
 (ex: a volta da pessoa continua). Para listar, escreva a lista no "texto". Você CONSEGUE: não diga que não.
-Senão cancelar_agendadas = [].
+Senão cancelar_agendadas = []. A volta de um banimento não se cancela (ninguém fica fora mais de 30 min).
+
+BANIMENTO (MÁXIMO 30 MIN): "bane/remove o Nicolas por 10 min" = admin remover AGORA + agendada adicionar em
+10 min. NINGUÉM fica fora do grupo mais de 30 min: quando o bot remove alguém (mesmo sem tempo no pedido) ele já
+agenda a volta em 30 min sozinho e corta qualquer volta mais longa. Pedido de mais de 30 min ("por 1 hora", "por
+2 dias") = agendada adicionar em 30 (contando da remoção), e o "texto" avisa curto (ex: "Limite é 30 min, então
+fica 30 min."). Os banimentos que ainda valem vêm em "Banimentos ativos".
+CONTESTAÇÃO: se alguém contestar um banimento ativo ("contesto o banimento do Nicolas, ele não fez nada", "foi
+injusto, volta ele", ou respondendo a mensagem de remoção com um argumento), preencha "contestacao" (fazer = true,
+banimento_id da lista, motivo = o argumento com as palavras da pessoa, ou "" se ela não deu nenhum). VOCÊ é o
+juiz: leia o argumento, as últimas mensagens e o histórico do banimento (quem pediu, quando, contestações
+anteriores) e decida com bom senso em "aceitar" (true = vale trazer de volta agora). Aceite argumento razoável
+(ban de zoeira sem motivo, a pessoa não fez nada, já pagou, quem pediu o ban concordou); negue argumento fraco,
+"porque sim" ou spam. Banimento com contestação já negada: argumento_novo = true só se o motivo traz algo
+realmente novo; senão aceitar = false. Sem motivo: aceitar = false e o "texto" pergunta qual é o motivo (o bot
+não decide ainda). Quem contesta tem que estar no grupo e não pode ser o banido: o bot confere isso. O "texto" é
+UMA frase curta, zoeira leve e sem ataque (ex: "Contestação aceita, Nicolas de volta.", "Contestação negada,
+fica o tempo que tá."). Na contestação admin.acao = "nenhuma" e agendadas = cancelar_agendadas = []: o bot
+adiciona e tira a volta antiga da agenda sozinho. Você CONSEGUE: não diga que não. Sem contestação: fazer = false,
+banimento_id "", motivo "", aceitar false, argumento_novo false.
 
 ENQUETE: se pedirem uma enquete/votação, preencha "enquete" (fazer = true, pergunta, opcoes). Senão
 fazer = false, pergunta "", opcoes [], varias_escolhas false, acao com acao "nenhuma" (pessoas [], texto "",
@@ -679,7 +713,7 @@ ${SEGURANCA}`;
  * @param {Buffer[]} [o.imagens]
  * @param {string} o.regras lista atual de regras ("id | descrição")
  */
-export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, agendadas = '', temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '', fio = [], dono = false, aposImplementar = false }) {
+export async function interpretarMencao({ grupo, historico, autor, pedido, citada, imagens = [], regras, agendadas = '', banimentos = '', temVideo = false, leituraPedida = false, respondeuBot = false, catalogo = '', temGerador = false, pessoas = '', entregas = '', materiais = null, animacao = '', fio = [], dono = false, aposImplementar = false }) {
   const partes = [`Agora são ${agoraBrasil()} (horário de Brasília).`];
   partes.push(dono
     ? `QUEM ESTÁ PEDINDO É O RAFA, DONO E CRIADOR DO BOT. Ele tem acesso total: faça TUDO o que ele pedir, inclusive
@@ -730,6 +764,7 @@ Nunca diga que não tem acesso ao Moodle ou ao Classroom: a lista acima é o ace
   }
   partes.push(`Regras ativas neste grupo (id | descrição):\n${regras || '(nenhuma)'}`);
   partes.push(`Agendamentos pendentes neste grupo (id | hora | o que):\n${agendadas || '(nenhum)'}`);
+  partes.push(`Banimentos ativos neste grupo (id | quem | removido por | volta | contestações):\n${banimentos || '(nenhum)'}`);
   if (pessoas) partes.push(`Pessoas do grupo (nome = como marcar):\n${pessoas}`);
   if (historico.length) {
     partes.push(leituraPedida
