@@ -932,7 +932,18 @@ async function iniciar() {
           implementarPedido({ pedido: v.implementar.pedido.trim(), original: pedido, m, jid, autor }).catch((e) => log('Implementar: erro', e.stack || e));
         }
         if (v.acao === 'responder' && Array.isArray(v.anexos)) anexos = v.anexos.filter((a) => a?.url).slice(0, 3);
-        if (v.acao === 'criar_regra') {
+        if (v.acao === 'criar_regra' && v.regra_modelo) {
+          // Regra pronta no código (regras.mjs, MODELOS): a IA só escolheu qual.
+          const r = regras.criarModelo(jid, v.regra_modelo, autor);
+          if (r.ok) {
+            log(`Regra ${r.regra.id} (${v.regra_modelo}) ${r.jaExistia ? 'já existia' : 'criada'}, pedido de ${autor}: ${r.regra.descricao}`);
+            servico = 'Regra criada';
+            resposta = resposta || `Regra criada (${r.regra.id}): ${r.regra.descricao}.`;
+          } else {
+            log(`Regra pronta recusada (${r.erro}) pedida por ${autor}.`);
+            resposta = `Não criei essa regra: ${r.erro}.`;
+          }
+        } else if (v.acao === 'criar_regra') {
           const remetente = { nome: v.regra_remetente || '', ids: v.regra_remetente ? outrosMarcados : [] };
           const figurinha = v.regra_so_figurinha_citada ? shaFigurinha(ctx?.quotedMessage?.stickerMessage || conteudo(m).stickerMessage) : null;
           const r = regras.criar(jid, v, remetente, autor, { figurinha });
@@ -2596,13 +2607,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     const tipo = tipoDaMensagem(c);
     if (!tipo) return false;
     const autor = m.pushName || digitos(m.key.participant || '');
+    // Só o texto e as @menções da própria mensagem contam (o que ela cita não dispara regra).
     const texto = textoDa(m);
+    const ctxMsg = contextoDa(c);
+    const autorIds = [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser);
     const disparadas = regras.disparadas({
-      jid, tipo, texto, autorNome: autor, figurinha: shaFigurinha(c.stickerMessage),
-      autorIds: [m.key.participant, m.key.participantAlt].filter(Boolean).map(jidNormalizedUser),
-    });
+      jid, tipo, texto, autorNome: autor, figurinha: shaFigurinha(c.stickerMessage), autorIds,
+      mencoes: (ctxMsg?.mentionedJid || []).map(jidNormalizedUser),
+    }).filter((r) => !(r.acao.tipo === 'privado_texto' && ctxMsg?.isForwarded)); // encaminhada não é fala da pessoa
     if (!disparadas.length) return false;
-    jaRespondidas.add(m.key.id);
+    // Regra de privado não aparece no grupo: a mensagem segue para o resto (figurinha, "?" etc.).
+    const soPrivado = disparadas.every((r) => r.acao.tipo === 'privado_texto');
+    if (!soPrivado) jaRespondidas.add(m.key.id);
 
     for (const regra of disparadas.slice(0, 2)) {
       log(`Regra ${regra.id} disparada por ${autor}: ${regra.descricao}`);
@@ -2611,6 +2627,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
         if (acao === 'apagar') {
           await sock.sendMessage(jid, { delete: { remoteJid: jid, id: m.key.id, fromMe: false, participant: m.key.participant } });
           log(`Regra ${regra.id}: apaguei a mensagem de ${autor}.`);
+          return;
+        }
+        if (acao === 'privado_texto') {
+          // No privado de quem mandou, pelo número (se o WhatsApp deu só o LID, vai pelo LID).
+          const destino = autorIds.find((i) => i.endsWith('@s.whatsapp.net')) || regra.remetente.ids.find((i) => i.endsWith('@s.whatsapp.net')) || autorIds[0];
+          await enviarPrivado(destino, arg);
+          log(`Regra ${regra.id}: mandei no privado de ${autor} (${destino}).`);
           return;
         }
         const imagens = c.imageMessage || c.stickerMessage ? [await baixar(m)] : [];
@@ -2639,7 +2662,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
       if (precisaClaude) filaClaude = filaClaude.then(executar).catch((e) => log(`Erro na regra ${regra.id}:`, e.message));
       else await executar().catch((e) => log(`Erro na regra ${regra.id}:`, e.message));
     }
-    return true;
+    return !soPrivado;
   }
 
   // Contexto do grupo: sai das mensagens salvas (em disco, inclusive as antigas buscadas no celular),

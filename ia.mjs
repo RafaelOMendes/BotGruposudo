@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
+import { MODELOS as REGRAS_PRONTAS } from './regras.mjs';
 
 let comando = null;
 let ultimoModelo = '';
@@ -400,6 +401,7 @@ const SCHEMA_MENCAO = {
     regra_acao_conteudo: { type: 'string', description: 'texto fixo (acao texto) ou instrução para o bot (acao ia/meme)' },
     regra_so_figurinha_citada: { type: 'boolean', description: 'true = a regra vale só para AQUELA figurinha (a que a pessoa respondeu/citou no pedido)' },
     regra_apagar_id: { type: 'string' },
+    regra_modelo: { type: 'string', enum: ['', ...Object.keys(REGRAS_PRONTAS)], description: 'regra pronta no código (ver "Regras prontas"); "" = regra comum montada pelos campos regra_*' },
     implementar: SCHEMA_IMPLEMENTAR,
     precisa_modelo_maior: { type: 'boolean', description: 'true só se o pedido for complexo demais para você fazer bem' },
     admin: SCHEMA_ADMIN('função de ADMIN do grupo para o bot executar AGORA (acao "nenhuma" se não pediram)'),
@@ -486,7 +488,7 @@ const SCHEMA_MENCAO = {
   },
   required: [
     'acao', 'texto', 'regra_descricao', 'regra_remetente', 'regra_tipo_mensagem', 'regra_texto_modo',
-    'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_so_figurinha_citada', 'regra_apagar_id', 'anexos',
+    'regra_texto_valor', 'regra_acao_tipo', 'regra_acao_conteudo', 'regra_so_figurinha_citada', 'regra_apagar_id', 'regra_modelo', 'anexos',
     'precisa_modelo_maior', 'figurinha', 'imagem_gerada', 'documento', 'figurinha_para_imagem', 'admin', 'enquete', 'agendadas',
     'cancelar_agendadas', 'implementar', 'contestacao', 'julgamento',
   ],
@@ -703,6 +705,12 @@ mostrar alguma coisa (notícia, placar, preço, link, informação, imagem, meme
   Recuse (com "responder") regras vagas demais que fariam o bot responder quase toda mensagem do grupo
   (qualquer pessoa + qualquer mensagem sem condição) e regras para spam. No "texto", confirme a regra criada
   de um jeito curto e zoeiro.
+  Regras prontas (regra_modelo; os outros campos regra_* ficam vazios, o bot monta a regra sozinho):
+    - "roteiro_shrek_privado": quando o Nicolas Bresolin falar do Bertolo ou do Bernardo (nome ou @), o bot
+      manda no PRIVADO do Nicolas o link do roteiro do Shrek 1 (no máximo 1 vez a cada 10 min, nada no
+      grupo). Use quando pedirem essa regra (pedido do Bertolo aceito pelo Rafa). Confirme no "texto" que a
+      regra foi criada, curto, sem colar o roteiro.
+  Fora desses casos, regra_modelo = "".
 - "apagar_regra": a pessoa quer remover uma regra; preencha regra_apagar_id com o id da lista abaixo.
   Para listar as regras, use "responder" e escreva a lista no texto.
 Campos que não se aplicam: "" (ou "qualquer"/"nenhum"/"texto" nos enums); anexos = [] quando não houver conteúdo para mandar.
