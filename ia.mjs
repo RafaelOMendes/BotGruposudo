@@ -455,8 +455,10 @@ const SCHEMA_MENCAO = {
         alvo: { type: 'string', description: 'recorte parte: o que recortar, bem específico (ex: "a terceira pessoa da esquerda para a direita", "o cara de boné azul", "o cachorro"); senão ""' },
         efeitos: { type: 'array', description: 'filtros aplicados na imagem (origem imagem/web), na ordem; [] se nenhum', items: { type: 'string', enum: ['inverter_cores', 'preto_e_branco', 'sepia', 'espelhar', 'virar_de_cabeca_pra_baixo', 'girar_90', 'desfocar', 'pixelar', 'saturar', 'brilho_alto', 'escurecer'] } },
         varias: { type: 'boolean', description: 'true = uma figurinha para CADA imagem/GIF/vídeo que a pessoa mandou nos últimos minutos ("de cada imagem", "de todas", "dessas")' },
+        com_audio: { type: 'boolean', description: 'true = pediram a figurinha do vídeo "com o áudio/som": o bot manda o áudio do vídeo logo depois, como mensagem de áudio' },
+        audio_segundos: { type: 'number', description: 'com_audio: quantos segundos de áudio (0 = o mesmo trecho da figurinha, até 6 s; só mude se pedirem outra duração, ex: "o áudio inteiro" = 60)' },
       },
-      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte', 'alvo', 'efeitos', 'varias'],
+      required: ['fazer', 'origem', 'url', 'meme_id', 'texto_cima', 'texto_baixo', 'texto', 'prompt', 'cor', 'recorte', 'alvo', 'efeitos', 'varias', 'com_audio', 'audio_segundos'],
       additionalProperties: false,
     },
     anexos: {
@@ -533,10 +535,15 @@ ${TOM_MEME.replace(/^/gm, '    ')}
   TIRAR O FUNDO: "tira o fundo", "sem fundo", "só a pessoa" (numa foto de uma pessoa só) → recorte
   "sem_fundo" (alvo ""): o bot tira o fundo e deixa só o assunto principal.
   O "texto" da resposta vira a legenda curta do serviço (ex: "figurinha do Nicolas feita"). Se não for
-  figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira", "alvo": "", "efeitos": []).
+  figurinha: fazer = false e o resto vazio ("origem": "texto", "cor": "branco", "recorte": "inteira", "alvo": "", "efeitos": [], "com_audio": false, "audio_segundos": 0).
   VÁRIAS: se pedirem figurinha de várias mídias ("de cada imagem que mandei", "de todas", "dessas fotos",
   "gif e vídeo também"), use origem "imagem" com varias = true: o bot junta TUDO que a pessoa mandou nos
   últimos minutos (fotos, álbum, GIFs, vídeos, figurinhas) e faz uma figurinha para cada. Senão varias = false.
+  COM ÁUDIO: figurinha do WhatsApp não tem som. Se pedirem figurinha de um vídeo "com o áudio", "com som",
+  "com a voz", use origem "imagem" com com_audio = true: o bot faz a figurinha animada e manda logo depois o
+  áudio do mesmo trecho do vídeo (audio_segundos 0 = os mesmos ~6 s; outro valor só se pedirem outra duração).
+  Se o vídeo não tiver som, o bot avisa sozinho. Nunca diga que não dá para usar o áudio. Senão com_audio =
+  false e audio_segundos = 0.
   EFEITOS: o bot aplica filtros DE VERDADE na imagem (origem imagem ou web, inclusive GIF): "efeitos" com
   inverter_cores, preto_e_branco, sepia, espelhar, virar_de_cabeca_pra_baixo, girar_90, desfocar, pixelar,
   saturar, brilho_alto, escurecer. "Inverte as cores e manda de novo" = figurinha origem imagem com

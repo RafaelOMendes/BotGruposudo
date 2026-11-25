@@ -43,7 +43,7 @@ import { decifrarEdicao, guardarSegredo } from './edicoes.mjs';
 import { contagem, encerrar, enquetesAbertas, novoSegredo, registrarEnquete, registrarVoto } from './enquetes.mjs';
 import { agendar, pendentes, vencidas, salvarAgenda, cancelar as cancelarAgendada } from './agenda.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { baixarImagemDaWeb, baixarMidiaDaWeb, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
+import { audioDoVideo, baixarImagemDaWeb, baixarMidiaDaWeb, duracaoAnimada, ehAnimada, ehSiteDeVideo, figurinhaAnimada, figurinhaParaMidia, iniciarDownloads, prepararAnexo, temDownloaderDeVideo } from './web.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 // "node index.mjs --verificar": só carrega os módulos (pega import quebrado) e sai. Usado antes de
@@ -915,6 +915,7 @@ async function iniciar() {
       let resposta;
       let anexos = [];
       let figurinhaPronta = null;
+      let audioDaFigurinha = null; // som do vídeo, mandado logo depois da figurinha (figurinha não tem som)
       let servico = null; // quando o bot fez um serviço (não só respondeu), a mensagem leva uma marca
       const idsDoAutor = [m.key.participant, m.key.participantAlt].filter(Boolean).map((i) => digitos(jidNormalizedUser(i)));
       // Gerar imagem leva ~1 a 2 min: avisa na hora para ninguém achar que travou.
@@ -1167,6 +1168,10 @@ async function iniciar() {
                 const fig = await montarFigurinha({ ...v.figurinha, origem: 'imagem' }, anim ? [] : [buffer], anim);
                 guardarEnviada(await sock.sendMessage(jid, { sticker: fig }, { quoted: g }));
                 feitas++;
+                if (v.figurinha.com_audio && anim) {
+                  const som = await somDaFigurinha(anim, fig, v.figurinha.audio_segundos).catch((e) => (log(`Áudio de uma das mídias falhou (${e.message}).`), null));
+                  if (som) guardarEnviada(await sock.sendMessage(jid, som, { quoted: g }));
+                }
               } catch (e) {
                 log(`Figurinha de uma das mídias de ${autor} falhou (${e.message}).`);
               }
@@ -1187,6 +1192,19 @@ async function iniciar() {
             figurinhaPronta = await montarFigurinha(v.figurinha, imagens, animado);
             servico = 'Figurinha';
             log(`Figurinha (${v.figurinha.origem}) feita para ${autor}.`);
+            // "Com o áudio": o som do mesmo trecho do vídeo vai numa mensagem de áudio logo depois.
+            if (v.figurinha.com_audio) {
+              const video = v.figurinha.origem === 'imagem' && animado?.ext === 'mp4' ? animado : null;
+              let aviso = video ? 'O vídeo não tem som, então foi só a figurinha.' : 'Não veio vídeo com som, então foi só a figurinha.';
+              try {
+                audioDaFigurinha = video ? await somDaFigurinha(video, figurinhaPronta, v.figurinha.audio_segundos) : null;
+              } catch (e) {
+                log(`Não deu para tirar o áudio do vídeo (${e.message}).`);
+                aviso = `Não consegui tirar o som do vídeo (${e.message}), foi só a figurinha.`;
+              }
+              if (audioDaFigurinha) log(`Áudio do vídeo vai junto da figurinha para ${autor}.`);
+              else resposta = [resposta, aviso].filter(Boolean).join('\n');
+            }
           } catch (e) {
             log(`Não deu para fazer a figurinha (${e.message}).`);
             if (v.figurinha.origem === 'gerada') {
@@ -1292,6 +1310,7 @@ async function iniciar() {
         resposta = 'Travei aqui, tenta de novo daqui a pouco.';
         anexos = [];
         figurinhaPronta = null;
+        audioDaFigurinha = null;
         servico = null;
       } finally {
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
@@ -1324,9 +1343,10 @@ async function iniciar() {
         ultimaId = id || ultimaId;
       }
       if (figurinhaPronta) ultimaId = guardarEnviada(await sock.sendMessage(jid, { sticker: figurinhaPronta }, { quoted: m }))?.key?.id || ultimaId;
+      if (audioDaFigurinha) ultimaId = guardarEnviada(await sock.sendMessage(jid, audioDaFigurinha, { quoted: m }))?.key?.id || ultimaId;
       registrar(jid, 'Bot', resposta || '[anexo]');
       ultimaRespostaBot.set(jid, { autorId: jidNormalizedUser(autorId), em: Date.now(), n: contadorMsgs.get(jid) || 0, msgId: ultimaId });
-      log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}${figurinhaPronta ? ' + figurinha' : ''}`);
+      log(`Respondi ${autor}: "${(resposta || '').slice(0, 80).replace(/\n/g, ' ')}"${anexos.length ? ` + ${anexos.length} anexo(s)` : ''}${figurinhaPronta ? ' + figurinha' : ''}${audioDaFigurinha ? ' + áudio' : ''}`);
     };
     const decisao = filaClaude.then(decidir);
     filaClaude = decisao.catch(() => {}); // libera a fila assim que o Claude responde
@@ -2518,6 +2538,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`);
     const area = await acharArea(buffer, f.alvo);
     log(`Recorte de "${f.alvo}": ${area.motivo} (x ${(area.x * 100).toFixed(0)}%, y ${(area.y * 100).toFixed(0)}%, ${(area.w * 100).toFixed(0)}x${(area.h * 100).toFixed(0)}%).`);
     return contornar(buffer, area);
+  }
+
+  // Som do vídeo para mandar depois da figurinha: mesmo trecho dela (ou `segundos`, se pedirem outra duração).
+  async function somDaFigurinha(video, figurinha, segundos = 0) {
+    const trecho = segundos > 0 ? Math.min(segundos, 5 * 60) : (await duracaoAnimada(figurinha)) || 6;
+    const mp3 = await audioDoVideo(video.buffer, { ext: video.ext, segundos: trecho });
+    return mp3 ? { audio: mp3, mimetype: 'audio/mpeg' } : null;
   }
 
   async function montarFigurinha(f, imagens, animado = null) {

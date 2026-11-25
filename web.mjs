@@ -403,6 +403,47 @@ export async function figurinhaAnimada(buffer, { ext = '', camada = null, filtro
   }
 }
 
+/** Duração (em segundos) de uma figurinha animada: a soma do tempo de cada quadro. */
+export async function duracaoAnimada(buffer) {
+  try {
+    const { delay = [] } = await sharp(buffer, { animated: true }).metadata();
+    return delay.reduce((s, d) => s + (d || 0), 0) / 1000;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Áudio de um vídeo (os primeiros `segundos`, o mesmo trecho da figurinha), em MP3 para o WhatsApp.
+ * Figurinha não carrega som, então o som vai numa mensagem de áudio à parte. null se o vídeo não tem áudio.
+ */
+export async function audioDoVideo(buffer, { ext = 'mp4', segundos = 6 } = {}) {
+  if (!ffmpeg) throw new Error('o ffmpeg não está instalado, não dá para tirar o áudio do vídeo');
+  if (['webp', 'gif'].includes(ext) || buffer.subarray(8, 12).toString() === 'WEBP') return null; // não tem som
+  const ffprobe = path.join(path.dirname(ffmpeg), path.basename(ffmpeg).replace(/ffmpeg/i, 'ffprobe'));
+  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-gabreu-ff-'));
+  try {
+    const entrada = path.join(pasta, `in.${ext || 'mp4'}`);
+    fs.writeFileSync(entrada, buffer);
+    const saida = await new Promise((resolve, reject) => {
+      const p = spawn(path.isAbsolute(ffmpeg) ? ffprobe : 'ffprobe', ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'json', entrada], { windowsHide: true });
+      let out = '';
+      p.stdout.on('data', (d) => (out += d));
+      p.on('error', reject);
+      p.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error('ffprobe falhou'))));
+    });
+    if (!(JSON.parse(saida).streams || []).length) return null;
+    await rodar(ffmpeg, [
+      '-y', ...(segundos > 0 ? ['-t', String(segundos)] : []), '-i', entrada,
+      '-vn', '-map', '0:a:0', '-c:a', 'libmp3lame', '-b:a', '128k', 'saida.mp3',
+    ], pasta, 2 * 60_000);
+    const mp3 = fs.readFileSync(path.join(pasta, 'saida.mp3'));
+    return mp3.length > 1024 ? mp3 : null; // só silêncio/cabeçalho: trata como sem áudio
+  } finally {
+    try { fs.rmSync(pasta, { recursive: true, force: true }); } catch { /* a faxina do início pega */ }
+  }
+}
+
 /**
  * O contrário da figurinha: figurinha parada vira foto (JPEG, fundo branco no lugar do transparente);
  * figurinha animada vira GIF do WhatsApp (mp4 sem áudio tocado em loop). Devolve o conteúdo para o sendMessage.
